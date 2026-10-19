@@ -66,6 +66,15 @@ it('uses the action as the title only while it fits, measured after escaping', (
 it('rejects malformed structured details instead of trusting them', () => {
   expect(() => gatewayApprovalPresentation(request({ ...summary, details: 'bad' as never }))).toThrow();
   expect(() => gatewayApprovalPresentation(request({ ...summary, action: '' }))).toThrow();
+  for (const omittedDetails of [-1, 1.5, '2' as never])
+    expect(() => gatewayApprovalPresentation(request({ ...summary, omittedDetails }))).toThrow();
+});
+
+it('says how many details were left out', () => {
+  const card = gatewayApprovalPresentation(
+    request({ ...summary, details: [{ label: 'To', value: 'Savings' }], omittedDetails: 3 }),
+  );
+  expect(card.question).toContain('*To:* Savings\n… 3 more fields not shown\nApprove once');
 });
 
 it('keeps legacy adapters compatible', () => {

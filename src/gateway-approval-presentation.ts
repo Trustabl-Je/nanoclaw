@@ -61,6 +61,10 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   if (summary.details !== undefined && (!Array.isArray(summary.details) || summary.details.length > 6)) {
     throw new Error('Invalid gateway approval details');
   }
+  const omitted = summary.omittedDetails;
+  if (omitted !== undefined && (!Number.isSafeInteger(omitted) || omitted < 0)) {
+    throw new Error('Invalid gateway approval details');
+  }
   const detailed = Boolean(summary.details?.length);
   const action = safe(summary.action);
   const resource = /^(?:[A-Z]+ |https?:)/.test(summary.resource)
@@ -86,6 +90,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     }
     lines.push(`*${safe(detail.label)}:* ${safe(detail.value)}`);
   }
+  if (omitted) lines.push(`… ${omitted} more field${omitted === 1 ? '' : 's'} not shown`);
   const scope = detailed
     ? 'Approve once to allow this action.'
     : 'Approve allows this request once. It does not connect an account or change its permissions.';
