@@ -195,15 +195,30 @@ describe('gateway approval coordinator', () => {
     expect(await pending).toBe('deny');
   });
 
-  it('refuses a request whose card title a channel could cut, posting nothing', async () => {
+  it('puts a long title in full at the top of the card body, under a short title', async () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
-    expect(await decide(request({ title: 'x'.repeat(MAX_CARD_TITLE_CHARS + 1) }))).toBe('deny');
-    expect(delivered).toHaveLength(0);
-    const pending = decide(request({ id: 'fits', title: 'x'.repeat(MAX_CARD_TITLE_CHARS) }));
+    const title = 'Delete repository '.repeat(4);
+    const pending = decide(request({ title }));
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const card = JSON.parse(delivered[0].content);
+    expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
+    expect(card.question).toBe(`*Request:* ${title}\nAllow POST api.example.test/resource?`);
     await coordinator.stopGatewayApprovalCoordinator();
     expect(await pending).toBe('deny');
+  });
+
+  it('allows a configured read with a long title and no summary without a card', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_READ_ONLY_HOSTS', 'api.example.test');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    const read = request({
+      trigger: 'default',
+      title: 'x'.repeat(MAX_CARD_TITLE_CHARS + 1),
+      destination: { host: 'api.example.test', method: 'GET' },
+    });
+    expect(await decide(read)).toBe('approve');
+    expect(delivered).toHaveLength(0);
   });
 
   it.each(['first-gateway', 'second-gateway'])('allows configured reads without cards for %s', async (kind) => {
