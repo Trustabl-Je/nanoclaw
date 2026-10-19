@@ -375,9 +375,10 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundText?: (text: string) => string;
   /**
-   * Optional escape for ask_question card text (open and resolved cards).
-   * Approval cards mix host wording with untrusted values (agent arguments,
-   * sender names); channels whose card text is raw platform markup set this.
+   * Optional escape for host-built ask_question card text (open and resolved
+   * cards). Approval cards mix host wording with untrusted values (agent
+   * arguments, sender names); channels whose card text is raw platform markup
+   * set this. Questions an agent asks itself (`fromAgent`) keep their markup.
    */
   escapeCardText?: (text: string) => string;
   /**
@@ -607,17 +608,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
    * is checked before anything posts, so buttons never sit next to cut text,
    * and every part is labelled so concurrent requests can't be mixed up.
    */
-  function planQuestionCard(questionId: string, title: string, question: string, actions: CardChild): QuestionCardPlan {
+  function planQuestionCard(
+    questionId: string,
+    title: string,
+    question: string,
+    actions: CardChild,
+    escape: (t: string) => string = cardText,
+  ): QuestionCardPlan {
     const withButtons = (t: string, blocks: string[]) =>
       Card({ title: t, children: [...blocks.map((block) => CardText(block)), actions] });
-    const whole = withButtons(title, splitCardText(question, cardText, CARD_TEXT_BLOCK_LENGTH));
-    if (fits(whole)) return { parts: [], card: whole, title, text: cardText(question) };
+    const whole = withButtons(title, splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH));
+    if (fits(whole)) return { parts: [], card: whole, title, text: escape(question) };
     // A title too long for a part moves into the text, under a fixed title.
     const widest = partLabel(questionId, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
     const partTitle = fits(textCard(title, [widest])) ? title : OVERFLOW_TITLE;
     const body = partTitle === title ? question : `${title}\n\n${question}`;
     for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
-      const parts = packParts(partTitle, questionId, splitCardText(body, cardText, limit));
+      const parts = packParts(partTitle, questionId, splitCardText(body, escape, limit));
       if (!parts) continue;
       const notice = [cardText(overflowNotice(questionId, parts.length))];
       const cardTitle = [title, OVERFLOW_TITLE].find((t) => fits(withButtons(t, notice)));
@@ -1073,7 +1080,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
         // Long text goes out as several blocks, measured after escaping, so no
         // per-block cap cuts it. A card the channel can't show whole posts its
-        // text first and the buttons after (planQuestionCard).
+        // text first and the buttons after (planQuestionCard). Questions an
+        // agent asks itself keep their own markup (`fromAgent`).
+        const escape = content.fromAgent === true ? (t: string) => t : cardText;
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const actions = Actions(
           // Encode button id/value with the option index rather than the
@@ -1085,7 +1094,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
           ),
         );
-        const plan = planQuestionCard(questionId, title, question, actions);
+        const plan = planQuestionCard(questionId, title, question, actions, escape);
         for (const part of plan.parts) await adapter.postMessage(tid, part);
         const result = await adapter.postMessage(tid, {
           card: plan.card,
