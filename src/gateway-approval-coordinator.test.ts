@@ -15,6 +15,7 @@ import {
   runMigrations,
 } from './db/index.js';
 import type { ChannelDeliveryAdapter } from './delivery.js';
+import { MAX_CARD_TITLE_CHARS } from './gateway-approval-presentation.js';
 import {
   gatewayRuntimeIdentity,
   type GatewayApprovalRequest,
@@ -166,6 +167,41 @@ describe('gateway approval coordinator', () => {
       const row = await getPendingApproval(card.questionId);
       expect(row?.question).toBe(card.question);
     });
+    await coordinator.stopGatewayApprovalCoordinator();
+    expect(await pending).toBe('deny');
+  });
+
+  it('delivers a long action in full in the card body under a short title', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    const action = 'Transfer funds '.repeat(40);
+    const pending = decide(
+      request({
+        summary: {
+          agent: 'Nano',
+          action,
+          resource: 'bank.example.test',
+          reason: 'An explicit policy requires approval',
+          details: Array.from({ length: 6 }, (_, i) => ({ label: `Detail ${i}`, value: `${i}`.repeat(600) })),
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const card = JSON.parse(delivered[0].content);
+    expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
+    expect(card.question.split('\n')[0]).toBe(`*Action:* ${action}`);
+    expect(card.question).toContain(`*Detail 5:* ${'5'.repeat(600)}`);
+    await coordinator.stopGatewayApprovalCoordinator();
+    expect(await pending).toBe('deny');
+  });
+
+  it('refuses a request whose card title a channel could cut, posting nothing', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    expect(await decide(request({ title: 'x'.repeat(MAX_CARD_TITLE_CHARS + 1) }))).toBe('deny');
+    expect(delivered).toHaveLength(0);
+    const pending = decide(request({ id: 'fits', title: 'x'.repeat(MAX_CARD_TITLE_CHARS) }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
     await coordinator.stopGatewayApprovalCoordinator();
     expect(await pending).toBe('deny');
   });
