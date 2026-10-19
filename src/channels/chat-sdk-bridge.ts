@@ -15,6 +15,7 @@ import {
   Button,
   LinkButton,
   type CardChild,
+  type CardElement,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
@@ -381,11 +382,18 @@ export interface ChatSdkBridgeConfig {
   escapeCardText?: (text: string) => string;
   /**
    * For a platform that caps a whole card's text: the longest ask_question
-   * title plus card text (after escapeCardText) it shows in full. A longer
-   * card is refused with CardTooLongError. Unset, long card text is posted
-   * in several text blocks, each under CARD_TEXT_BLOCK_LENGTH.
+   * title plus card text (after escapeCardText) it shows in full. Shorthand
+   * for cardFits; a longer card overflows the same way.
    */
   maxCardTextLength?: number;
+  /**
+   * Whether the platform shows this exact card with nothing cut or rejected.
+   * An ask_question card that doesn't fit posts its full text first as
+   * button-less cards, then a short card with the buttons; if any part can't
+   * fit, nothing posts (CardTooLongError). A resolved card that doesn't fit
+   * keeps less text. Unset, every card fits.
+   */
+  cardFits?: (card: CardElement) => boolean;
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -457,6 +465,28 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
  */
 export const CARD_TEXT_BLOCK_LENGTH = 2000;
 
+interface PlannedCard {
+  card: CardElement;
+  fallbackText: string;
+}
+
+interface QuestionCardPlan {
+  /** Button-less cards posted first when the whole card doesn't fit. */
+  parts: PlannedCard[];
+  /** The card with the buttons, and its title and text for the fallback. */
+  card: CardElement;
+  title: string;
+  text: string;
+}
+
+/** Title for the button card when the request's own title doesn't fit it. */
+const OVERFLOW_TITLE = 'Approval request';
+/** Smallest text block an overflow split goes down to, and the most parts, before giving up. */
+const MIN_OVERFLOW_BLOCK = 250;
+const MAX_OVERFLOW_PARTS = 20;
+const overflowNotice = (ref: string, parts: number) =>
+  `The full request is in the ${parts === 1 ? 'message' : `${parts} messages`} marked ref ${ref} above.`;
+
 const FENCE = '```';
 /** A fence opens or closes only at the start of a line; backticks mid-line are text. */
 const FENCE_LINE = /^ {0,3}```/gm;
@@ -492,7 +522,11 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
       const afterLine = rest.lastIndexOf('\n', cut - 1) + 1;
       if (afterLine > cut / 2 && fits(afterLine)) cut = afterLine;
       // Backing off a fence marker can change which fences close, so recheck.
-      const badCut = (n: number) => isHighSurrogate(rest.charCodeAt(n - 1)) || (rest[n - 1] === '`' && rest[n] === '`');
+      // A cut mid-line before backticks would turn them into a fence line.
+      const badCut = (n: number) =>
+        isHighSurrogate(rest.charCodeAt(n - 1)) ||
+        (rest[n - 1] === '`' && rest[n] === '`') ||
+        (rest[n - 1] !== '\n' && /^ {0,3}```/.test(rest.slice(n, n + 6)));
       while (cut > 0 && (badCut(cut) || !fits(cut))) cut--;
       if (cut === 0) throw new CardTooLongError('the request cannot be split into card text blocks');
     }
@@ -557,13 +591,84 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
-  const terminalMessage = (spec: TerminalApprovalCard) =>
-    terminalApprovalMessage({
+  const cardTextsOf = (card: CardElement): string[] =>
+    card.children.flatMap((child) => (child.type === 'text' ? [child.content] : []));
+  const fits = (card: CardElement): boolean =>
+    (config.maxCardTextLength === undefined ||
+      !cardQuestionTooLong(card.title ?? '', cardTextsOf(card).join('\n'), config.maxCardTextLength)) &&
+    (config.cardFits?.(card) ?? true);
+  const textCard = (title: string, blocks: string[]) =>
+    Card({ ...(title ? { title } : {}), children: blocks.map((block) => CardText(block)) });
+
+  /**
+   * How an ask_question card goes out: whole when it fits; otherwise its full
+   * text as button-less parts, then a short card with the buttons. Every part
+   * is checked before anything posts, so buttons never sit next to cut text,
+   * and every part is labelled so concurrent requests can't be mixed up.
+   */
+  function planQuestionCard(questionId: string, title: string, question: string, actions: CardChild): QuestionCardPlan {
+    const withButtons = (t: string, blocks: string[]) =>
+      Card({ title: t, children: [...blocks.map((block) => CardText(block)), actions] });
+    const whole = withButtons(title, splitCardText(question, cardText, CARD_TEXT_BLOCK_LENGTH));
+    if (fits(whole)) return { parts: [], card: whole, title, text: cardText(question) };
+    for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
+      const parts = packParts(title, questionId, splitCardText(question, cardText, limit));
+      if (!parts) continue;
+      const notice = [cardText(overflowNotice(questionId, parts.length))];
+      const cardTitle = [title, OVERFLOW_TITLE].find((t) => fits(withButtons(t, notice)));
+      if (cardTitle === undefined) throw new CardTooLongError('the approval card does not fit this channel');
+      return { parts, card: withButtons(cardTitle, notice), title: cardTitle, text: notice.join('\n') };
+    }
+    throw new CardTooLongError('the request is too long to show in full on this channel');
+  }
+
+  /**
+   * Greedily packs blocks into button-less cards that each fit, labelled with
+   * the whole question id (unique per request), or undefined.
+   */
+  function packParts(title: string, ref: string, blocks: string[]): PlannedCard[] | undefined {
+    const label = (i: number, n: number) => cardText(`Request ref ${ref}, part ${i} of ${n}`);
+    const widest = label(MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
+    const parts = [{ title, blocks: [] as string[] }];
+    if (!fits(textCard(title, [widest]))) return undefined;
+    for (const block of blocks) {
+      const current = parts[parts.length - 1];
+      if (fits(textCard(current.title, [widest, ...current.blocks, block]))) {
+        current.blocks.push(block);
+      } else if (fits(textCard('', [widest, block]))) {
+        parts.push({ title: '', blocks: [block] });
+      } else {
+        return undefined;
+      }
+    }
+    if (parts.length > MAX_OVERFLOW_PARTS) return undefined;
+    const labelled = parts.map((part, i) => {
+      const texts = [label(i + 1, parts.length), ...part.blocks];
+      return { card: textCard(part.title, texts), fallbackText: [part.title, ...texts].filter(Boolean).join('\n\n') };
+    });
+    return labelled.every((part) => fits(part.card)) ? labelled : undefined;
+  }
+
+  // The resolved card replaces the buttons: the full request when it fits,
+  // else the request ref (its overflow parts carry it) and the resolution.
+  const terminalMessage = (spec: TerminalApprovalCard, questionId?: string) => {
+    const resolution = cardText(spec.resolution);
+    const full: TerminalApprovalCard = {
       ...spec,
       question: cardText(spec.question),
       questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
-      resolution: cardText(spec.resolution),
-    });
+      resolution,
+    };
+    if (fits(buildTerminalApprovalCard(full))) return terminalApprovalMessage(full);
+    const texts: string[][] = questionId === undefined ? [[]] : [[cardText(`Request ref ${questionId}`)], []];
+    for (const blocks of texts) {
+      for (const title of [spec.title, OVERFLOW_TITLE, '']) {
+        const short = { title, question: blocks.join('\n'), questionBlocks: blocks, resolution };
+        if (fits(buildTerminalApprovalCard(short))) return terminalApprovalMessage(short);
+      }
+    }
+    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: cardText('Resolved.') });
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -808,7 +913,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             tid,
             event.messageId,
             render?.question
-              ? terminalMessage({ title, question: render.question, resolution })
+              ? terminalMessage({ title, question: render.question, resolution }, questionId)
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
@@ -929,7 +1034,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           await adapter.editMessage(
             tid,
             content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
+            terminalMessage(
+              terminalCard as TerminalApprovalCard,
+              typeof content.questionId === 'string' ? content.questionId : undefined,
+            ),
           );
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
@@ -960,34 +1068,24 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
         // Long text goes out as several blocks, measured after escaping, so no
-        // per-block cap cuts it. A platform that caps the whole card refuses
-        // what it can't show, counting the fences the split adds.
-        const text = cardText(question);
-        const blocks = splitCardText(question, cardText, CARD_TEXT_BLOCK_LENGTH);
-        if (config.maxCardTextLength !== undefined) {
-          const tooLong = cardQuestionTooLong(title, blocks.join('\n'), config.maxCardTextLength);
-          if (tooLong) throw new CardTooLongError(tooLong);
-        }
+        // per-block cap cuts it. A card the channel can't show whole posts its
+        // text first and the buttons after (planQuestionCard).
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
-        const card = Card({
-          title,
-          children: [
-            ...blocks.map((block) => CardText(block)),
-            Actions(
-              // Encode button id/value with the option index rather than the
-              // full value. Telegram caps callback_data at 64 bytes, and
-              // long values (e.g. ISO datetimes, URLs) push the JSON payload
-              // well past that. The onAction handlers resolve the index back
-              // to the real value via resolveQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-              ),
-            ),
-          ],
-        });
+        const actions = Actions(
+          // Encode button id/value with the option index rather than the
+          // full value. Telegram caps callback_data at 64 bytes, and
+          // long values (e.g. ISO datetimes, URLs) push the JSON payload
+          // well past that. The onAction handlers resolve the index back
+          // to the real value via resolveQuestionRender(questionId).
+          options.map((opt, idx) =>
+            Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+          ),
+        );
+        const plan = planQuestionCard(questionId, title, question, actions);
+        for (const part of plan.parts) await adapter.postMessage(tid, part);
         const result = await adapter.postMessage(tid, {
-          card,
-          fallbackText: `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          card: plan.card,
+          fallbackText: `${plan.title}\n\n${plan.text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }
