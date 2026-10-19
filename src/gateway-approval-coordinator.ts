@@ -1,4 +1,4 @@
-import { gatewayApprovalPresentation, MAX_CARD_TITLE_CHARS } from './gateway-approval-presentation.js';
+import { gatewayApprovalPresentation } from './gateway-approval-presentation.js';
 import { permitsConfiguredGatewayRead, permitsUncredentialedGatewayRead } from './gateway-read-policy.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getProviderHostContract } from './provider-contracts/index.js';
@@ -729,12 +729,7 @@ async function sweepOverdueGatewayApprovals(): Promise<void> {
 }
 
 function validateRequest(request: GatewayApprovalRequest): void {
-  // A channel could cut a longer title while the buttons stay live. Typed
-  // display fields bring their own renderer.
-  const { title } = gatewayApprovalPresentation(request);
-  if (!request.displayFields && title.length > MAX_CARD_TITLE_CHARS) {
-    throw new Error('Gateway approval title is too long to show in full');
-  }
+  gatewayApprovalPresentation(request);
   if (request.approverUserId !== undefined && !/^[^:\s]+:[^\s]+$/.test(request.approverUserId)) {
     throw new Error('Gateway selected approver is invalid');
   }

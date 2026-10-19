@@ -9,8 +9,8 @@ const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
 /**
  * Channels cap or clip card titles (the tightest at 60), some after expanding
- * emoji names. The body, which channels post whole, always carries the full
- * action; a longer action gets a fixed title.
+ * emoji names. A longer title or action goes in full into the body, which
+ * channels post whole, under a fixed title.
  */
 export const MAX_CARD_TITLE_CHARS = 60;
 
@@ -49,7 +49,10 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     return { title: request.title, question };
   }
   const summary = request.summary;
-  if (!summary) return { title: request.title, question: request.question };
+  if (!summary) {
+    if (request.title.length <= MAX_CARD_TITLE_CHARS) return { title: request.title, question: request.question };
+    return { title: 'Approve external request', question: `*Request:* ${safe(request.title)}\n${request.question}` };
+  }
   for (const field of ['agent', 'action', 'resource', 'reason'] as const) {
     if (typeof summary[field] !== 'string' || !summary[field].trim() || summary[field].length > 600) {
       throw new Error('Invalid gateway approval summary');
