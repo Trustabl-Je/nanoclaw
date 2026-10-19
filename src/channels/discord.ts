@@ -2,7 +2,8 @@
  * Discord channel adapter (v2) — uses Chat SDK bridge.
  * Self-registers on import.
  */
-import { createDiscordAdapter } from '@chat-adapter/discord';
+import { cardToDiscordPayload, createDiscordAdapter } from '@chat-adapter/discord';
+import type { CardElement } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
@@ -20,6 +21,23 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
   group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
+
+/**
+ * Discord shows a card as one embed and rejects a title over 256 characters, a
+ * description over 4,096, more than 5 rows of buttons or a button label over
+ * 80, so a card is measured with the adapter's own embed builder.
+ */
+export function fitsDiscordEmbed(card: CardElement): boolean {
+  const { embeds, components } = cardToDiscordPayload(card);
+  const [embed] = embeds;
+  const labels = components.flatMap((row) => row.components.map((c) => ('label' in c ? (c.label ?? '') : '')));
+  return (
+    (embed?.title?.length ?? 0) <= 256 &&
+    (embed?.description?.length ?? 0) <= 4096 &&
+    components.length <= 5 &&
+    labels.every((label) => label.length <= 80)
+  );
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
@@ -92,6 +110,7 @@ registerChannelAdapter('discord', {
       // Discord rejects messages over 2000 chars; without this the bridge
       // would let long agent replies fail instead of splitting them.
       maxTextLength: 2000,
+      cardFits: fitsDiscordEmbed,
     });
   },
   defaults: DISCORD_DEFAULTS,
