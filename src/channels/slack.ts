@@ -138,6 +138,20 @@ export async function slackAuthorIsBot(slackAdapter: SlackAdapter, userId: strin
   return user?.isBot ?? null;
 }
 
+/**
+ * Card text reaches Block Kit as raw mrkdwn, where `&`, `<` and `>` are control
+ * characters (links, mentions). Entity-escape them so untrusted values in
+ * approval cards show as typed; a word joiner after `@` keeps a bare
+ * @here/@channel/@everyone from becoming a mention.
+ */
+export function escapeSlackMrkdwn(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -189,6 +203,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: slackRawTextExtractor(slackAdapter),
+    escapeCardText: escapeSlackMrkdwn,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
