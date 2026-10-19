@@ -19,6 +19,15 @@ const GCHAT_DEFAULTS: ChannelDefaults = {
   mentions: 'platform',
 };
 
+/**
+ * Card text reaches Google Chat as textParagraph HTML, where `<` and `&` start
+ * tags and entities. Entity-escape them so untrusted values in approval cards
+ * show as typed.
+ */
+export function escapeGChatHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 registerChannelAdapter('gchat', {
   factory: () => {
     const env = readEnvFile(['GCHAT_CREDENTIALS', 'GOOGLE_CHAT_BOT_USER_ID', 'GOOGLE_CHAT_PROJECT_NUMBER']);
@@ -36,6 +45,7 @@ registerChannelAdapter('gchat', {
     });
     return createChatSdkBridge({
       adapter: gchatAdapter,
+      escapeCardText: escapeGChatHtml,
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: GCHAT_DEFAULTS,
