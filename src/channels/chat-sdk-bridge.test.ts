@@ -751,6 +751,22 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       for (const card of cards) expect(within(600, card)).toBe(true);
     });
 
+    it('moves a title too long for a part into the text', async () => {
+      const { calls, postMessage } = numberedPosts();
+      // Titles over 100 never fit; text up to 300 does.
+      const cardFits = (card: CardElement) => (card.title ?? '').length <= 100 && fitsWithin(400)(card);
+      const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false, cardFits });
+      const title = 'T'.repeat(150);
+
+      await bridge.deliver('slack:D1', null, questionCard(LONG, title));
+      const cards = postedCards(calls);
+      const parts = cards.slice(0, -1);
+      expect(parts[0].title).toBe('Approval request');
+      expect(partText(parts)).toBe(`${title}\n\n${LONG}`);
+      expect(cards.at(-1)!.title).toBe('Approval request');
+      expect(cards.at(-1)!.hasButtons).toBe(true);
+    });
+
     it('posts nothing when the text cannot fit even split', async () => {
       const { calls, postMessage } = numberedPosts();
       const bridge = createChatSdkBridge({

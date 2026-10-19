@@ -598,6 +598,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     (config.maxCardTextLength === undefined ||
       !cardQuestionTooLong(card.title ?? '', cardTextsOf(card).join('\n'), config.maxCardTextLength)) &&
     (config.cardFits?.(card) ?? true);
+  const partLabel = (ref: string, i: number, n: number) => cardText(`Request ref ${ref}, part ${i} of ${n}`);
   const textCard = (title: string, blocks: string[]) =>
     Card({ ...(title ? { title } : {}), children: blocks.map((block) => CardText(block)) });
 
@@ -618,8 +619,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       Card({ title: t, children: [...blocks.map((block) => CardText(block)), actions] });
     const whole = withButtons(title, splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH));
     if (fits(whole)) return { parts: [], card: whole, title, text: escape(question) };
+    // A title too long for a part moves into the text, under a fixed title.
+    const widest = partLabel(questionId, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
+    const partTitle = fits(textCard(title, [widest])) ? title : OVERFLOW_TITLE;
+    const body = partTitle === title ? question : `${title}\n\n${question}`;
     for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
-      const parts = packParts(title, questionId, splitCardText(question, escape, limit));
+      const parts = packParts(partTitle, questionId, splitCardText(body, escape, limit));
       if (!parts) continue;
       const notice = [cardText(overflowNotice(questionId, parts.length))];
       const cardTitle = [title, OVERFLOW_TITLE].find((t) => fits(withButtons(t, notice)));
@@ -634,8 +639,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
    * the whole question id (unique per request), or undefined.
    */
   function packParts(title: string, ref: string, blocks: string[]): PlannedCard[] | undefined {
-    const label = (i: number, n: number) => cardText(`Request ref ${ref}, part ${i} of ${n}`);
-    const widest = label(MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
+    const widest = partLabel(ref, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
     const parts = [{ title, blocks: [] as string[] }];
     if (!fits(textCard(title, [widest]))) return undefined;
     for (const block of blocks) {
@@ -650,7 +654,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     }
     if (parts.length > MAX_OVERFLOW_PARTS) return undefined;
     const labelled = parts.map((part, i) => {
-      const texts = [label(i + 1, parts.length), ...part.blocks];
+      const texts = [partLabel(ref, i + 1, parts.length), ...part.blocks];
       return { card: textCard(part.title, texts), fallbackText: [part.title, ...texts].filter(Boolean).join('\n\n') };
     });
     return labelled.every((part) => fits(part.card)) ? labelled : undefined;
