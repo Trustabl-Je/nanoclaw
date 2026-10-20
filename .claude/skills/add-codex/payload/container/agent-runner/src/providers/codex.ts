@@ -142,9 +142,9 @@ export class CodexProvider implements AgentProvider {
     let wakeActiveTurn: (() => void) | null = null;
     // Follow-ups steered into the running turn are answered by its one result,
     // which reports them as `answeredInputs` so the poll loop's turn queue
-    // stays in step. A rejected steer runs as its own turn, so it is uncounted.
-    let turnSeq = 0;
-    let steered = 0;
+    // stays in step. Each entry settles true once the server accepts the steer;
+    // a rejected one runs as its own turn instead.
+    let steers: Array<Promise<boolean>> = [];
 
     const wake = (): void => {
       waiting?.();
@@ -152,14 +152,19 @@ export class CodexProvider implements AgentProvider {
     };
 
     const pushOrSteer = (message: string): void => {
-      if (activeServer && activeThreadId && activeTurnId) {
-        const turn = turnSeq;
-        steered++;
-        void this.runtime.steerCodexTurn(activeServer, activeThreadId, activeTurnId, message).catch(() => {
-          if (turn === turnSeq) steered--;
-          pending.push(message);
-          wake();
-        });
+      // Steer only with nothing queued: a follow-up must not overtake an
+      // earlier one still waiting for its own turn.
+      if (activeServer && activeThreadId && activeTurnId && pending.length === 0) {
+        steers.push(
+          this.runtime.steerCodexTurn(activeServer, activeThreadId, activeTurnId, message).then(
+            () => true,
+            () => {
+              pending.push(message);
+              wake();
+              return false;
+            },
+          ),
+        );
         return;
       }
       pending.push(message);
@@ -202,8 +207,7 @@ export class CodexProvider implements AgentProvider {
           if (pending.length === 0 && ended) return;
 
           const text = pending.shift()!;
-          turnSeq++;
-          steered = 0;
+          const turnSteers: Array<Promise<boolean>> = (steers = []);
           const turnEvents = runOneTurn(
             server,
             threadId,
@@ -228,8 +232,12 @@ export class CodexProvider implements AgentProvider {
             self.runtime.startCodexTurn,
           );
           for await (const event of turnEvents) {
-            // Assigned, not typed: a core without the field compiles and ignores it.
-            if (event.type === 'result' && steered > 0) Object.assign(event, { answeredInputs: 1 + steered });
+            if (event.type === 'result' && turnSteers.length > 0) {
+              const folded = (await Promise.all(turnSteers)).filter(Boolean).length;
+              if (aborted) return;
+              // Assigned, not typed: a core without the field compiles and ignores it.
+              if (folded > 0) Object.assign(event, { answeredInputs: 1 + folded });
+            }
             yield event;
           }
         }
