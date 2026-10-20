@@ -63,9 +63,9 @@ describe('escapeSlackMrkdwn', () => {
 });
 
 describe('escapeSlackTitle', () => {
-  it('swaps < and the @ of bare special mentions for full-width look-alikes, keeping the length', () => {
+  it('swaps < for a full-width look-alike, keeping the length and a bare @here as typed', () => {
     const title = 'Create agent: "<!channel>" @here a@b & x';
-    expect(escapeSlackTitle(title)).toBe('Create agent: "\uff1c!channel>" \uff20here a@b & x');
+    expect(escapeSlackTitle(title)).toBe('Create agent: "\uff1c!channel>" @here a@b & x');
     expect(escapeSlackTitle(title)).toHaveLength(title.length);
   });
 });
@@ -140,8 +140,10 @@ describe('Slack approval card text', () => {
     const notification = cardToFallbackText(card);
     expect(notification).not.toContain('<!channel>');
     expect(notification).not.toContain('<https://');
-    expect(notification).not.toMatch(/@here\b/);
-    // The plain-text header shows the title with look-alikes, at the same length.
+    // A bare @here stays as typed; without `<!here>` (and no link_names) it is no mention.
+    expect(notification).toContain('@here');
+    expect(notification).not.toContain('<!');
+    // The plain-text header shows the title with the look-alike, at the same length.
     const header = cardToBlockKit(card).find((b) => b.type === 'header') as unknown as { text: { text: string } };
     expect(header.text.text).toBe(escapeSlackTitle(title));
   });

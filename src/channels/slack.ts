@@ -156,11 +156,12 @@ export function escapeSlackMrkdwn(text: string): string {
 /**
  * Slack shows a card's title as a plain-text header, but also puts it in the
  * message's mrkdwn notification text, where `<...>` forms links and mentions.
- * Full-width look-alikes for `<`, and for `@` in a bare @here/@channel/
- * @everyone, keep the title inert there without changing its length.
+ * A full-width look-alike for `<` keeps the title inert there without changing
+ * its length. A bare @here stays as typed: no link_names is sent, so it forms
+ * no mention.
  */
 export function escapeSlackTitle(title: string): string {
-  return title.replace(/</g, '\uff1c').replace(/@(here|channel|everyone)\b/gi, '\uff20$1');
+  return title.replace(/</g, '\uff1c');
 }
 
 /**
