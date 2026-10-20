@@ -527,9 +527,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     );
     process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; detail?: string }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, _raw?: string, detail?: string): Promise<never> => {
+      failCalls.push({ step, msg, hint, detail });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -554,6 +554,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // The first line of the bounce reason rides along for callers with no terminal.
+    expect(failCalls[0].detail).toMatch(/\S/);
+    expect(failCalls[0].detail).not.toContain('\n');
   });
 });
 

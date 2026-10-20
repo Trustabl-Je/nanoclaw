@@ -64,7 +64,8 @@ setup serialise checkout changes through `data/setup-mutation.lock`.
 The running NanoClaw service supervises the saved job and resumes it after a service or machine
 restart, with the terminal and browser closed. Verification reports success while approval is
 pending (`SLACK_INSTALL: awaiting_approval` or `installing`, `WIRING: pending_slack_install`); a
-failed or expired job still fails it.
+failed or expired job still fails it, and `SLACK_INSTALL_REASON` says why (the step that stopped
+and its first error line, with tokens removed).
 
 Recovery:
 

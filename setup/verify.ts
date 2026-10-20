@@ -16,7 +16,7 @@ import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
 import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
-import { readSlackJob, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
+import { readSlackJob, slackJobFailure, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -226,8 +226,10 @@ export async function run(_args: string[]): Promise<void> {
 
   // The detached Slack worker applies the channel after foreground setup
   // releases its checkout lock. No credentials/groups yet is expected here.
-  const slackInstall = slackJobStatus(await readSlackJob(projectRoot));
+  const slackJob = await readSlackJob(projectRoot);
+  const slackInstall = slackJobStatus(slackJob);
   const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
+  const slackReason = slackJobFailure(slackJob);
 
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
@@ -271,6 +273,7 @@ export async function run(_args: string[]): Promise<void> {
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
     ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    ...(slackReason ? { SLACK_INSTALL_REASON: slackReason } : {}),
     ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',

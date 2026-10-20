@@ -229,8 +229,12 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   offerBack?: boolean;
   /** The first-prompt back gate; defaults to back-nav.ts `backGate`. Injectable for tests. */
   backGate?: (label: string) => Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION>;
-  /** The abort path; defaults to runner.ts `fail` (which exits). Injectable for tests. */
-  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string) => Promise<never>;
+  /**
+   * The abort path; defaults to runner.ts `fail` (which exits). Injectable for
+   * tests. `detail` is the first line of the bounce reason, for a caller with
+   * no terminal to read the warnings.
+   */
+  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string, detail?: string) => Promise<never>;
 }
 
 export async function runChannelSkill(
@@ -248,7 +252,7 @@ export async function runChannelSkill(
   }
 
   const projectRoot = overrides.projectRoot ?? process.cwd();
-  const failWith = overrides.fail ?? fail;
+  const failWith: NonNullable<ChannelSkillOverrides['fail']> = overrides.fail ?? fail;
   // The agent name + role are wire inputs — in wireIfResolved mode, defer the
   // prompts past the skill run (only a fresh create resolves the wire inputs;
   // a drop-through re-run asks nothing).
@@ -308,11 +312,16 @@ export async function runChannelSkill(
     // instead of a generic "couldn't finish" message. Only a real bounce yields a
     // diagnosis; a purely-deferred run (a missing input) falls back to the generic.
     const diag = firstFailureHint(res);
+    const detail = res.agentTasks[0]?.reason
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean);
     await failWith(
       `${channel}-install`,
       diag?.headline ?? `Couldn't finish setting up ${channel}.`,
       diag?.hint ?? 'See logs/setup-steps/ for details, then retry setup.',
       rawLog,
+      detail,
     );
   }
 
