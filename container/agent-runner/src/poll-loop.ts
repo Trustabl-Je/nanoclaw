@@ -631,10 +631,11 @@ export async function processQuery(
         markCompleted(initialBatchIds);
         // A provider may fold pushes into the running turn (the Claude CLI
         // does, between tool rounds) and answer them with this one result.
-        // Retire their queued turns too, or every later answer lands one
-        // turn behind, in the previous message's thread.
+        // Retire their queued turns too (at the turn boundary below, so a
+        // throw before it still notices them), or every later answer lands
+        // one turn behind, in the previous message's thread.
         const folded = Math.min(Math.max((event.answeredInputs ?? 1) - 1, 0), queuedTurns.length);
-        const foldedTurns = queuedTurns.splice(0, folded);
+        const foldedTurns = queuedTurns.slice(0, folded);
         if (folded > 0) {
           log(`Result answered ${folded} queued turn(s) folded into this one`);
           archivePrompts.splice(0, folded + 1, archivePrompts.slice(0, folded + 1).join('\n\n'));
@@ -738,6 +739,7 @@ export async function processQuery(
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
         nudgedWindow = undefined;
+        queuedTurns.splice(0, folded);
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;

@@ -9,11 +9,13 @@
  *    one result, so the turn queue stayed one entry behind until the query
  *    ended.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import type { AgentQuery, ProviderEvent, ProviderExchange, QueryInput } from './providers/types.js';
 
 const CONTRACT = { textDelivery: 'mid-turn-complete', commands: { formatting: 'xml' } } as const;
@@ -273,6 +275,29 @@ describe('a failed turn with a folded message', () => {
       ['Turn failed.', 'thread-a'],
       ['Turn failed.', 'thread-b'],
       ['re: c', 'thread-c'],
+    ]);
+  });
+  it('still notices the folded thread when the first notice write throws', async () => {
+    const provider = new FoldingProvider();
+    const release = provider.hold();
+    insertMessage('a', 'ask:a', 'thread-a');
+    const stop = startLoop(provider);
+    const write = spyOn(getAgentMailbox().operations, 'writeMessageOut');
+    try {
+      await waitFor(() => provider.holding === 1);
+      insertMessage('b', 'ask:b', 'thread-b');
+      await waitFor(pushed(provider, 'b'));
+      provider.failNext = true;
+      write.mockRejectedValueOnce(new Error('Mailbox notice write rejected'));
+      release();
+      await waitFor(() => replies().length >= 2);
+    } finally {
+      write.mockRestore();
+      await stop();
+    }
+    expect(replies()).toEqual([
+      [GENERIC_FAILURE_NOTICE, 'thread-a'],
+      [GENERIC_FAILURE_NOTICE, 'thread-b'],
     ]);
   });
 });
