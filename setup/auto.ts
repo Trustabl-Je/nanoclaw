@@ -94,6 +94,8 @@ import { upsertEnvVar } from './set-env.js';
 import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { dockerSudoReason, sudoUpFront } from './lib/sudo-preflight.js';
+import { isWSL } from './platform.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
@@ -283,6 +285,24 @@ async function main(): Promise<void> {
     // The answer lives in `.env` (imageSourceDecided); the perk reminder below
     // reads it from there, so it survives a resume and a plain re-run alike.
     await chooseImageSource();
+    // Installing or starting Docker runs sudo inside the windowed step, where
+    // its prompt is hidden. Ask here: bootstrap's sudo timestamp may have run
+    // out while the questions above were answered.
+    const dockerSudo = dockerSudoReason();
+    if (dockerSudo) {
+      const sudo = await sudoUpFront(() =>
+        p.log.message(
+          brandBody(dimWrap(`Setup needs to ${dockerSudo} Docker, so it will ask for your Linux password (sudo).`, 4)),
+        ),
+      );
+      if (sudo === 'refused') {
+        await fail(
+          'container',
+          `Couldn't get sudo access to ${dockerSudo} Docker.`,
+          `Run setup again and enter your Linux password, or ${dockerSudo} Docker yourself first.`,
+        );
+      }
+    }
     p.log.message(
       brandBody(
         dimWrap(
@@ -308,10 +328,15 @@ async function main(): Promise<void> {
         );
       }
       if (err === 'docker_group_not_active') {
+        // Closing a WSL terminal doesn't log the user out, so the new group
+        // only shows up once WSL itself restarts.
+        const distro = process.env.WSL_DISTRO_NAME?.trim() || 'Ubuntu';
         await fail(
           'container',
           "Docker was just installed but your shell doesn't know yet.",
-          'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          isWSL()
+            ? `Close ${distro}, run \`wsl --shutdown\` in PowerShell, then reopen ${distro}, go back to the NanoClaw folder and run \`bash nanoclaw.sh\`.`
+            : 'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
