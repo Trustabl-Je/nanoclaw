@@ -57,8 +57,11 @@ describe('CodexProvider active turns', () => {
 
     await waitFor(() => fake.startCalls.length === 1);
     query.push('steered one');
+    await waitFor(() => fake.steerCalls.length === 1);
+    await sleep(0); // its reply settles before the next follow-up
     query.push('steered two');
     await waitFor(() => fake.steerCalls.length === 2);
+    await sleep(0);
     fake.completeTurn('first answer');
     await sleep(0);
     query.push('next turn');
@@ -139,6 +142,64 @@ describe('CodexProvider active turns', () => {
       { type: 'result', text: 'first answer' },
       { type: 'result', text: 'second answer' },
     ]);
+  });
+
+  it('queues a follow-up that arrives while a steer awaits its reply, behind that steer if it is rejected', async () => {
+    let rejectSteer: (err: Error) => void = () => {};
+    const fake = createFakeCodexRuntime({
+      steerReply: () => new Promise<void>((_, reject) => (rejectSteer = reject)),
+    });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('rejected follow-up');
+    await waitFor(() => fake.steerCalls.length === 1);
+    query.push('later follow-up'); // the steer has no reply yet: queued
+    rejectSteer(new Error('steer rejected'));
+    fake.completeTurn('first answer');
+    await waitFor(() => fake.startCalls.length === 2);
+    fake.completeTurn('second answer');
+    await waitFor(() => fake.startCalls.length === 3);
+    query.end();
+    fake.completeTurn('third answer');
+
+    await collect;
+
+    expect(fake.steerCalls).toHaveLength(1);
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual([
+      'first prompt',
+      'rejected follow-up',
+      'later follow-up',
+    ]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer' },
+      { type: 'result', text: 'second answer' },
+      { type: 'result', text: 'third answer' },
+    ]);
+  });
+
+  it('stops promptly on abort while a result waits for a steer reply', async () => {
+    const fake = createFakeCodexRuntime({ steerReply: () => new Promise<void>(() => {}) });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('unanswered steer');
+    await waitFor(() => fake.steerCalls.length === 1);
+    fake.completeTurn('first answer');
+    await sleep(20);
+    query.abort();
+    await Promise.race([collect, sleep(500).then(() => Promise.reject(new Error('abort did not stop the stream')))]);
+
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
+    expect(fake.killed).toBe(true);
   });
 
   it('queues follow-ups for the next turn when steering is rejected', async () => {

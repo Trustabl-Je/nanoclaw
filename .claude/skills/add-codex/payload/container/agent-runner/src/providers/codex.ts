@@ -142,9 +142,11 @@ export class CodexProvider implements AgentProvider {
     let wakeActiveTurn: (() => void) | null = null;
     // Follow-ups steered into the running turn are answered by its one result,
     // which reports them as `answeredInputs` so the poll loop's turn queue
-    // stays in step. Each entry settles true once the server accepts the steer;
-    // a rejected one runs as its own turn instead.
+    // stays in step. Each entry settles true once the server accepts the steer.
     let steers: Array<Promise<boolean>> = [];
+    let steerInFlight = false;
+    let onAbort: () => void = () => {};
+    const abortedP = new Promise<void>((resolve) => (onAbort = resolve));
 
     const wake = (): void => {
       waiting?.();
@@ -152,18 +154,25 @@ export class CodexProvider implements AgentProvider {
     };
 
     const pushOrSteer = (message: string): void => {
-      // Steer only with nothing queued: a follow-up must not overtake an
-      // earlier one still waiting for its own turn.
-      if (activeServer && activeThreadId && activeTurnId && pending.length === 0) {
+      // Inputs stay in push order: steer only with nothing queued and no
+      // steer awaiting its reply. A rejected steer runs as its own turn ahead
+      // of everything queued meanwhile, all of which arrived after it.
+      if (activeServer && activeThreadId && activeTurnId && pending.length === 0 && !steerInFlight) {
+        steerInFlight = true;
         steers.push(
-          this.runtime.steerCodexTurn(activeServer, activeThreadId, activeTurnId, message).then(
-            () => true,
-            () => {
-              pending.push(message);
-              wake();
-              return false;
-            },
-          ),
+          this.runtime
+            .steerCodexTurn(activeServer, activeThreadId, activeTurnId, message)
+            .then(
+              () => true,
+              () => {
+                pending.unshift(message);
+                wake();
+                return false;
+              },
+            )
+            .finally(() => {
+              steerInFlight = false;
+            }),
         );
         return;
       }
@@ -233,8 +242,9 @@ export class CodexProvider implements AgentProvider {
           );
           for await (const event of turnEvents) {
             if (event.type === 'result' && turnSteers.length > 0) {
-              const folded = (await Promise.all(turnSteers)).filter(Boolean).length;
-              if (aborted) return;
+              const replies = await Promise.race([Promise.all(turnSteers), abortedP]);
+              if (aborted || !replies) return;
+              const folded = replies.filter(Boolean).length;
               // Assigned, not typed: a core without the field compiles and ignores it.
               if (folded > 0) Object.assign(event, { answeredInputs: 1 + folded });
             }
@@ -258,6 +268,7 @@ export class CodexProvider implements AgentProvider {
       },
       abort: () => {
         aborted = true;
+        onAbort();
         if (activeServer && activeThreadId && activeTurnId) {
           void this.runtime.interruptCodexTurn(activeServer, activeThreadId, activeTurnId).catch(() => {});
         }
