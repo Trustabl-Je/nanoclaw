@@ -1,0 +1,146 @@
+/**
+ * OneCLI hands agents the proxy in its GATEWAY_BASE_URL, which defaults to
+ * host.docker.internal:10255: the agent's own machine. For a gateway on another
+ * host that is a port nothing serves, so every model call retries with no reply
+ * and no error until the gateway host overrides it.
+ */
+import dns from 'dns';
+import net from 'net';
+import os from 'os';
+
+type Interfaces = ReturnType<typeof os.networkInterfaces>;
+type Lookup = (host: string) => Promise<string[]>;
+
+function bare(host: string): string {
+  return host.replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+function isLoopback(host: string): boolean {
+  const h = bare(host);
+  return h === 'localhost' || h === '::1' || (net.isIPv4(h) && h.startsWith('127.'));
+}
+
+/** An address that, seen from inside an agent container, is that container or its host. */
+function isAgentLocal(host: string): boolean {
+  const h = bare(host);
+  return isLoopback(h) || h === 'host.docker.internal' || h === '0.0.0.0' || h === '::';
+}
+
+function isThisMachine(host: string, interfaces: Interfaces): boolean {
+  const h = bare(host);
+  return isLoopback(h) || Object.values(interfaces).some((addrs) => (addrs ?? []).some((a) => a.address === h));
+}
+
+/** The proxy URL from a /v1/container-config answer, or null. Carries the agent token. */
+export function advertisedProxy(config: unknown): URL | null {
+  const env = (config as { env?: Record<string, unknown> } | null)?.env;
+  const raw = env?.HTTPS_PROXY ?? env?.https_proxy ?? env?.HTTP_PROXY ?? env?.http_proxy;
+  if (typeof raw !== 'string') return null;
+  try {
+    return new URL(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The container config of an existing agent: the seeded "default", else the
+ * project's current default. Always named, because without `agent=` OneCLI
+ * creates a default agent, with access to every secret, when none exists.
+ * Never throws: setup only warns from it.
+ */
+export async function readContainerConfig(
+  gatewayUrl: string,
+  apiKey: string | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: true; config: unknown } | { ok: false; reason: string }> {
+  const base = gatewayUrl.replace(/\/+$/, '');
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (process.env.ONECLI_PROJECT_ID) headers['X-Project-Id'] = process.env.ONECLI_PROJECT_ID;
+  const get = (route: string) => fetchImpl(`${base}${route}`, { headers, signal: AbortSignal.timeout(5000) });
+  try {
+    let res = await get('/v1/container-config?agent=default');
+    if (res.status === 404) {
+      const agents = (await (await get('/v1/agents')).json().catch(() => [])) as unknown;
+      const list = Array.isArray(agents) ? (agents as { identifier?: unknown; isDefault?: unknown }[]) : [];
+      const id = (list.find((a) => a.isDefault === true) ?? list[0])?.identifier;
+      if (typeof id !== 'string' || id === 'default') return { ok: false, reason: 'no agent to read' };
+      res = await get(`/v1/container-config?agent=${encodeURIComponent(id)}`);
+    }
+    if (!res.ok) return { ok: false, reason: `status ${res.status}` };
+    return { ok: true, config: await res.json() };
+  } catch (err) {
+    // The name only: a message could echo request details.
+    return { ok: false, reason: err instanceof Error ? err.name : 'unknown error' };
+  }
+}
+
+const lookupAll: Lookup = async (host) => (await dns.promises.lookup(host, { all: true })).map((a) => a.address);
+
+/**
+ * A one-line warning with the exact fix when a gateway on another host points
+ * agents at their own machine, else null. Prints host and port only, never the
+ * proxy's credentials.
+ */
+export function remoteProxyHint(
+  gatewayUrl: string,
+  config: unknown,
+  gatewayAddresses: string[] = [],
+  interfaces: Interfaces = os.networkInterfaces(),
+): string | null {
+  const proxy = advertisedProxy(config);
+  if (!proxy || !isAgentLocal(proxy.hostname)) return null;
+  const gatewayHost = new URL(gatewayUrl).hostname;
+  if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, interfaces))) return null;
+  const port = proxy.port || '80';
+  return (
+    `The remote OneCLI gateway tells agents to use the proxy ${proxy.hostname}:${port}, their own machine, ` +
+    `so model calls will hang with no reply. On the gateway host, add GATEWAY_BASE_URL=${gatewayHost}:${port} ` +
+    "to ~/.onecli/.env (or to the onecli service's environment: if its compose file does not load that .env), " +
+    'then recreate it on the image it runs now: cd ~/.onecli && ' +
+    `ONECLI_VERSION="$(docker inspect -f '{{.Config.Image}}' onecli | sed 's/.*://')" docker compose up -d. ` +
+    'Re-run setup to check.'
+  );
+}
+
+/** Every outcome carries a sentence, so an agent applying the skill by hand can relay any of them. */
+export type ProxyCheck = { status: 'ok' | 'warn' | 'skipped'; hint: string };
+
+const REACHABLE: ProxyCheck = { status: 'ok', hint: 'OneCLI hands agents a proxy address they can reach.' };
+
+export function skippedCheck(reason: string): ProxyCheck {
+  return { status: 'skipped', hint: `Could not check the proxy address OneCLI hands agents (${reason}).` };
+}
+
+/** The gateway URL and API key the runtime uses: process env first, then `.env`. */
+export function runtimeGateway(
+  env: NodeJS.ProcessEnv,
+  saved: Record<string, string>,
+): { url: string | undefined; apiKey: string | undefined } {
+  return {
+    url: env.ONECLI_URL || saved.ONECLI_URL || undefined,
+    apiKey: env.ONECLI_API_KEY || saved.ONECLI_API_KEY || undefined,
+  };
+}
+
+/** Read the proxy a gateway hands agents and judge it; a local gateway is fine. */
+export async function checkRemoteProxy(
+  gatewayUrl: string,
+  apiKey: string | undefined,
+  deps: { fetchImpl?: typeof fetch; lookup?: Lookup; interfaces?: Interfaces } = {},
+): Promise<ProxyCheck> {
+  const interfaces = deps.interfaces ?? os.networkInterfaces();
+  const host = new URL(gatewayUrl).hostname;
+  let addresses: string[] = [];
+  try {
+    addresses = await (deps.lookup ?? lookupAll)(host);
+  } catch {
+    // Unresolved here: judge the name as given.
+  }
+  if ([host, ...addresses].some((h) => isThisMachine(h, interfaces))) return REACHABLE;
+  const read = await readContainerConfig(gatewayUrl, apiKey, deps.fetchImpl);
+  if (!read.ok) return skippedCheck(read.reason);
+  const hint = remoteProxyHint(gatewayUrl, read.config, addresses, interfaces);
+  return hint ? { status: 'warn', hint } : REACHABLE;
+}
