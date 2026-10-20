@@ -390,8 +390,9 @@ export class ClaudeProvider implements AgentProvider {
             queued_turn_count?: number;
           };
           const isError = m.is_error === true;
-          // Older CLIs echo no uuids: count the result as answering one input.
           const consumed = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []);
+          // Older CLIs and zeroed results echo no uuids: they answer the oldest input.
+          if (consumed.length === 0) unanswered.shift();
           let answeredInputs = 0;
           for (const uuid of consumed) {
             const at = unanswered.indexOf(uuid);
