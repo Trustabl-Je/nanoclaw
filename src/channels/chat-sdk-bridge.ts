@@ -487,6 +487,12 @@ const MIN_OVERFLOW_BLOCK = 250;
 const MAX_OVERFLOW_PARTS = 20;
 const overflowNotice = (ref: string, parts: number) =>
   `The full request is in the ${parts === 1 ? 'message' : `${parts} messages`} marked ref ${ref} above.`;
+const stoppedNotice = (ref: string, posted: number, parts: number) =>
+  `Request ref ${ref} stopped after part ${posted} of ${parts}. It can't be answered until all its parts and buttons arrive.`;
+/** How long a partly posted overflow card waits for a retry to resume it. */
+const OVERFLOW_RESUME_MS = 60 * 60_000;
+/** How long a failed delivery waits for its stopped note before reporting the failure. */
+const STOPPED_NOTE_WAIT_MS = 5_000;
 
 const FENCE = '```';
 /** A fence opens or closes only at the start of a line; backticks mid-line are text. */
@@ -658,6 +664,93 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       return { card: textCard(part.title, texts), fallbackText: [part.title, ...texts].filter(Boolean).join('\n\n') };
     });
     return labelled.every((part) => fits(part.card)) ? labelled : undefined;
+  }
+
+  /**
+   * Overflow progress per question: parts already posted, so a retry resumes
+   * instead of reposting, and the button card's id once delivered, so a repeat
+   * of the same request doesn't post it again. Deliveries of one question run
+   * one at a time.
+   */
+  const overflowProgress = new Map<
+    string,
+    { key: string; posted: number; noted: boolean; at: number; deliveredId?: string | null }
+  >();
+  const overflowRuns = new Map<string, Promise<unknown>>();
+
+  async function postQuestionCard(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
+    const previous = overflowRuns.get(questionId) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() =>
+        plan.parts.length
+          ? postOverflowOnce(tid, questionId, plan, fallbackText)
+          : postWholeCard(tid, questionId, plan, fallbackText),
+      );
+    overflowRuns.set(questionId, run);
+    try {
+      return await run;
+    } finally {
+      if (overflowRuns.get(questionId) === run) overflowRuns.delete(questionId);
+    }
+  }
+
+  async function postWholeCard(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
+    const result = await adapter.postMessage(tid, { card: plan.card, fallbackText });
+    overflowProgress.delete(questionId);
+    return result?.id;
+  }
+
+  /**
+   * Posts an overflowed card's parts, then its buttons. When posting stops
+   * partway, one short note (postMessage, which every adapter has; edits and
+   * deletes are not universal) says the request can't be answered yet.
+   */
+  async function postOverflowOnce(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
+    // The exact cards: text, button ids, labels and styles.
+    const key = createHash('sha256')
+      .update(JSON.stringify([tid, plan.parts, plan.card, fallbackText]))
+      .digest('hex');
+    const now = Date.now();
+    for (const [id, entry] of overflowProgress) {
+      if (id !== questionId && !overflowRuns.has(id) && now - entry.at > OVERFLOW_RESUME_MS)
+        overflowProgress.delete(id);
+    }
+    const saved = overflowProgress.get(questionId);
+    if (saved?.key === key && saved.deliveredId !== undefined) return saved.deliveredId ?? undefined;
+    const progress = saved?.key === key ? saved : { key, posted: 0, noted: false, at: now };
+    progress.at = now;
+    overflowProgress.set(questionId, progress);
+    try {
+      for (; progress.posted < plan.parts.length; progress.posted++) {
+        await adapter.postMessage(tid, plan.parts[progress.posted]);
+      }
+      const result = await adapter.postMessage(tid, { card: plan.card, fallbackText });
+      progress.deliveredId = result?.id ?? null;
+      progress.at = Date.now();
+      return result?.id;
+    } catch (err) {
+      if (progress.posted > 0 && !progress.noted) {
+        const note = cardText(stoppedNotice(questionId, progress.posted, plan.parts.length));
+        const card = textCard('', [note]);
+        if (fits(card)) {
+          // A stalled note must not hold back the failure (a gateway denies on it).
+          let timer: NodeJS.Timeout | undefined;
+          await Promise.race([
+            adapter.postMessage(tid, { card, fallbackText: note }).then(
+              () => (progress.noted = true),
+              (noteErr: unknown) => log.warn('Failed to post a stopped-card note', { questionId, err: noteErr }),
+            ),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, STOPPED_NOTE_WAIT_MS);
+              timer.unref?.();
+            }),
+          ]);
+          clearTimeout(timer);
+        }
+      }
+      throw err;
+    }
   }
 
   // The resolved card replaces the buttons: the full request when it fits,
@@ -1095,12 +1188,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           ),
         );
         const plan = planQuestionCard(questionId, title, question, actions, escape);
-        for (const part of plan.parts) await adapter.postMessage(tid, part);
-        const result = await adapter.postMessage(tid, {
-          card: plan.card,
-          fallbackText: `${plan.title}\n\n${plan.text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
-        });
-        return result?.id;
+        const fallbackText = `${plan.title}\n\n${plan.text}\nOptions: ${options.map((o) => o.label).join(', ')}`;
+        return await postQuestionCard(tid, questionId, plan, fallbackText);
       }
 
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
