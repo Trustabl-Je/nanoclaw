@@ -97,7 +97,8 @@ describe('folded inputs', () => {
     const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const query = provider.query({ prompt: 'first', cwd: tmp });
-    for (let i = 1; i < 70; i++) query.push(`input ${i}`);
+    // Input 70 is never taken by the SDK, so it cannot have been folded.
+    for (let i = 1; i <= 70; i++) query.push(`input ${i}`);
     const answered: Array<number | undefined> = [];
     for await (const e of query.events) if (e.type === 'result') answered.push(e.answeredInputs);
     expect(answered).toEqual([69, undefined]);

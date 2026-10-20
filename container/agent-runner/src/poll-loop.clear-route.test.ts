@@ -269,7 +269,7 @@ describe('/clear batched with accumulated context only', () => {
 
   it('keeps the context pending beside /upload-trace, for the next message', async () => {
     const provider = new FoldingProvider();
-    insertMessage('ctx', 'ambient ask:ctx', 'thread-q', 0);
+    insertMessage('ctx', 'ambient ask:ctx', 'thread-ctx', 0);
     insertMessage('upload', '/upload-trace', 'thread-upload');
     const stop = startLoop(provider);
     try {

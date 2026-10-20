@@ -89,6 +89,11 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
+  /** Inputs the SDK has not taken yet: they cannot have reached the CLI. */
+  get untaken(): number {
+    return this.queue.length;
+  }
+
   /** Returns the uuid the CLI echoes in the `result` that answers this input. */
   push(text: string): string {
     const uuid = crypto.randomUUID();
@@ -396,8 +401,10 @@ export class ClaudeProvider implements AgentProvider {
           }
           // The list keeps only the first 64 inputs a turn consumed. Past
           // that, every older input the CLI no longer holds queued was folded.
+          // One written but not yet read by the CLI would also count; that
+          // misroutes one answer, while undercounting stays behind for good.
           if (consumed.length >= USER_MESSAGE_UUIDS_MAX && m.queued_turn_count !== undefined) {
-            const unlisted = Math.max(unanswered.length - m.queued_turn_count, 0);
+            const unlisted = Math.max(unanswered.length - stream.untaken - m.queued_turn_count, 0);
             unanswered.splice(0, unlisted);
             answeredInputs += unlisted;
           }
