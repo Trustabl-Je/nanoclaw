@@ -157,11 +157,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
-
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
     // the runner handles directly is /clear (session reset).
+    // Each command replies in its own thread: a batch route would put the
+    // reply, or the turn answering the rest of the batch, in another one.
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
 
@@ -170,12 +170,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
+        const route = extractRouting([msg]);
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
+          platform_id: route.platformId,
+          channel_type: route.channelType,
+          thread_id: route.threadId,
           content: JSON.stringify({ text: 'Session cleared.' }),
         });
         commandIds.push(msg.id);
@@ -185,12 +186,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // ambient context, never a runner command (isClearCommand self-guards).
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
         log('Uploading session trace to Hugging Face');
+        const route = extractRouting([msg]);
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
+          platform_id: route.platformId,
+          channel_type: route.channelType,
+          thread_id: route.threadId,
           content: JSON.stringify({ text: uploadTrace(config.providerName) }),
         });
         commandIds.push(msg.id);
@@ -203,12 +205,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       markCompleted(commandIds);
     }
 
-    if (normalMessages.length === 0) {
+    // Context rows beside a command never wake a turn on their own (the
+    // accumulate gate above); they are consumed with the command.
+    if (!normalMessages.some((m) => m.trigger === 1)) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
       if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${messages.length} message(s) were commands, skipping query`);
+      log(`All ${commandIds.length} triggering message(s) were commands, skipping query`);
       continue;
     }
+    const routing = extractRouting(normalMessages);
 
     // Pre-task scripts: for any task rows with a `script`, run it before the
     // provider call. Scripts returning wakeAgent=false (or erroring) gate
@@ -423,7 +428,8 @@ export async function processQuery(
   // pushed while an answer is still streaming waits its turn — the in-flight
   // answer keeps the destination it started with. Pushed routes queue in
   // push order (including retries) and advance at every result, mirroring
-  // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
+  // archivePrompts; a result that answers folded pushes advances past them
+  // too. An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
   type QueuedTurn = {
     routing: RoutingContext;
@@ -616,6 +622,16 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // A provider may fold pushes into the running turn (the Claude CLI
+        // does, between tool rounds) and answer them with this one result.
+        // Retire their queued turns too, or every later answer lands one
+        // turn behind, in the previous message's thread.
+        const folded = Math.min(Math.max((event.answeredInputs ?? 1) - 1, 0), queuedTurns.length);
+        if (folded > 0) {
+          log(`Result answered ${folded} queued turn(s) folded into this one`);
+          queuedTurns.splice(0, folded);
+          archivePrompts.splice(0, folded + 1, archivePrompts.slice(0, folded + 1).join('\n\n'));
+        }
         const resultText = event.text ?? '';
         const failed = event.isError === true;
         if (resultText || failed) {
