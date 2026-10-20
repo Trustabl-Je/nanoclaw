@@ -10,11 +10,11 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cardToBlockKit } from '@chat-adapter/slack';
+import { cardToBlockKit, cardToFallbackText } from '@chat-adapter/slack';
 import type { AdapterPostableMessage } from 'chat';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { escapeSlackMrkdwn, slackInstanceBridgeFactory } from './slack.js';
+import { escapeSlackMrkdwn, escapeSlackTitle, fitsSlackHeader, slackInstanceBridgeFactory } from './slack.js';
 
 const posted: AdapterPostableMessage[] = [];
 
@@ -62,6 +62,32 @@ describe('escapeSlackMrkdwn', () => {
   });
 });
 
+describe('escapeSlackTitle', () => {
+  it('swaps < and the @ of bare special mentions for full-width look-alikes, keeping the length', () => {
+    const title = 'Create agent: "<!channel>" @here a@b & x';
+    expect(escapeSlackTitle(title)).toBe('Create agent: "\uff1c!channel>" \uff20here a@b & x');
+    expect(escapeSlackTitle(title)).toHaveLength(title.length);
+  });
+});
+
+describe('fitsSlackHeader', () => {
+  const card = (title: string) => ({ type: 'card' as const, title, children: [] });
+
+  it('measures the header the adapter builds against the 150-character limit', () => {
+    expect(fitsSlackHeader(card('x'.repeat(145) + '@here'))).toBe(true);
+    expect(fitsSlackHeader(card('x'.repeat(151)))).toBe(false);
+  });
+
+  it('counts emoji names the adapter expands', () => {
+    // `{{emoji:info}}` (14 characters) becomes `:information_source:` (20).
+    expect(fitsSlackHeader(card('x'.repeat(135) + '{{emoji:info}}'))).toBe(false);
+    const [header] = cardToBlockKit(card('x'.repeat(135) + '{{emoji:info}}')) as unknown as Array<{
+      text: { text: string };
+    }>;
+    expect(header.text.text.length).toBeGreaterThan(150);
+  });
+});
+
 describe('Slack approval card text', () => {
   /** Text of every section block in the last posted card, as Slack receives it. */
   function postedSections(): string[] {
@@ -97,6 +123,44 @@ describe('Slack approval card text', () => {
       type: 'mrkdwn',
       text: '&lt;https://example.com|click&gt; wants to talk &amp; &lt;!here&gt; @\u2060here',
     });
+  });
+
+  it('keeps link and mention syntax in the title inert in the notification text', async () => {
+    const bridge = slackInstanceBridgeFactory('cards');
+    const title = 'Create agent: "<!channel>" @here <https://example.com|click>';
+    await bridge!.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'appr-2', title, question: 'Approve?', options: ['Approve'] },
+    });
+
+    const card = (posted.at(-1) as { card: Parameters<typeof cardToBlockKit>[0] }).card;
+    // Slack's top-level `text`, the mrkdwn fallback for notifications.
+    const notification = cardToFallbackText(card);
+    expect(notification).not.toContain('<!channel>');
+    expect(notification).not.toContain('<https://');
+    expect(notification).not.toMatch(/@here\b/);
+    // The plain-text header shows the title with look-alikes, at the same length.
+    const header = cardToBlockKit(card).find((b) => b.type === 'header') as unknown as { text: { text: string } };
+    expect(header.text.text).toBe(escapeSlackTitle(title));
+  });
+
+  it('moves a title too long for the header into the card text, never over the limit', async () => {
+    const bridge = slackInstanceBridgeFactory('cards');
+    const title = 'x'.repeat(135) + '{{emoji:info}}';
+    await bridge!.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'appr-3', title, question: 'Approve?', options: ['Approve'] },
+    });
+    expect(posted.length).toBeGreaterThan(1);
+
+    const cards = posted.map((m) => (m as { card: Parameters<typeof cardToBlockKit>[0] }).card);
+    for (const c of cards) {
+      const header = cardToBlockKit(c).find((b) => b.type === 'header') as unknown as
+        | { text: { text: string } }
+        | undefined;
+      expect(header?.text.text.length ?? 0).toBeLessThanOrEqual(150);
+    }
+    expect(cards.map((c) => cardToFallbackText(c)).join('\n')).toContain('x'.repeat(135));
   });
 
   it('escapes every block when a long host card is split into several sections', async () => {

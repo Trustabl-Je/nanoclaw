@@ -14,7 +14,8 @@
  * channelType stays 'slack' either way, so user ids, formatting, container
  * config, and the wiring-defaults declaration are shared across instances.
  */
-import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { cardToBlockKit, createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { isCardElement, type AdapterPostableMessage, type CardElement } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
@@ -152,6 +153,50 @@ export function escapeSlackMrkdwn(text: string): string {
     .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
 }
 
+/**
+ * Slack shows a card's title as a plain-text header, but also puts it in the
+ * message's mrkdwn notification text, where `<...>` forms links and mentions.
+ * Full-width look-alikes for `<`, and for `@` in a bare @here/@channel/
+ * @everyone, keep the title inert there without changing its length.
+ */
+export function escapeSlackTitle(title: string): string {
+  return title.replace(/</g, '\uff1c').replace(/@(here|channel|everyone)\b/gi, '\uff20$1');
+}
+
+/**
+ * Slack rejects a header over 150 characters. The bridge's text blocks already
+ * fit Slack's per-block cap, so only the header is measured, as the adapter
+ * builds it; a longer title moves into the card text under a fixed title.
+ */
+export function fitsSlackHeader(card: CardElement): boolean {
+  if (!card.title) return true;
+  const [header] = cardToBlockKit({ ...card, title: escapeSlackTitle(card.title) }) as Array<{
+    text?: { text?: string };
+  }>;
+  return (header?.text?.text?.length ?? 0) <= 150;
+}
+
+function withSafeTitle(message: AdapterPostableMessage): AdapterPostableMessage {
+  const card = isCardElement(message)
+    ? message
+    : typeof message === 'object' && 'card' in message
+      ? message.card
+      : null;
+  if (!card?.title) return message;
+  const safe = { ...card, title: escapeSlackTitle(card.title) };
+  return isCardElement(message) ? safe : { ...(message as object), card: safe };
+}
+
+/** Pass every card title through escapeSlackTitle on its way to Slack. */
+export function escapeCardTitles(adapter: Pick<SlackAdapter, 'postMessage' | 'editMessage'>): void {
+  const postMessage = adapter.postMessage?.bind(adapter);
+  if (postMessage) adapter.postMessage = (threadId, message) => postMessage(threadId, withSafeTitle(message));
+  const editMessage = adapter.editMessage?.bind(adapter);
+  if (editMessage) {
+    adapter.editMessage = (threadId, messageId, message) => editMessage(threadId, messageId, withSafeTitle(message));
+  }
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -200,10 +245,12 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     mode: appToken ? 'socket' : 'webhook',
   });
   setSlackAuthorIsBotResolver(options.instanceKey ?? 'slack', (userId) => slackAuthorIsBot(slackAdapter, userId));
+  escapeCardTitles(slackAdapter);
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: slackRawTextExtractor(slackAdapter),
     escapeCardText: escapeSlackMrkdwn,
+    cardFits: fitsSlackHeader,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
