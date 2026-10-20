@@ -72,19 +72,21 @@ describe('escapeSlackTitle', () => {
 
 describe('fitsSlackHeader', () => {
   const card = (title: string) => ({ type: 'card' as const, title, children: [] });
+  const headerOf = (c: Parameters<typeof cardToBlockKit>[0]) =>
+    (cardToBlockKit(c) as unknown as Array<{ text: { text: string } }>)[0].text.text;
 
-  it('measures the header the adapter builds against the 150-character limit', () => {
+  it('measures the title against the 150-character header limit', () => {
     expect(fitsSlackHeader(card('x'.repeat(145) + '@here'))).toBe(true);
     expect(fitsSlackHeader(card('x'.repeat(151)))).toBe(false);
   });
 
-  it('counts emoji names the adapter expands', () => {
+  it('counts emoji names the adapter expands, which it would not show in full', () => {
     // `{{emoji:info}}` (14 characters) becomes `:information_source:` (20).
-    expect(fitsSlackHeader(card('x'.repeat(135) + '{{emoji:info}}'))).toBe(false);
-    const [header] = cardToBlockKit(card('x'.repeat(135) + '{{emoji:info}}')) as unknown as Array<{
-      text: { text: string };
-    }>;
-    expect(header.text.text.length).toBeGreaterThan(150);
+    const c = card('x'.repeat(135) + '{{emoji:info}}');
+    expect(fitsSlackHeader(c)).toBe(false);
+    // Older adapters send it whole (Slack rejects over 150); newer ones cut it.
+    const header = headerOf(c);
+    expect(header.length > 150 || header.endsWith('…')).toBe(true);
   });
 });
 
@@ -159,6 +161,7 @@ describe('Slack approval card text', () => {
         | { text: { text: string } }
         | undefined;
       expect(header?.text.text.length ?? 0).toBeLessThanOrEqual(150);
+      expect(header?.text.text.endsWith('…') ?? false).toBe(false);
     }
     expect(cards.map((c) => cardToFallbackText(c)).join('\n')).toContain('x'.repeat(135));
   });

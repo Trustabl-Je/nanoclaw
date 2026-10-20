@@ -14,7 +14,7 @@
  * channelType stays 'slack' either way, so user ids, formatting, container
  * config, and the wiring-defaults declaration are shared across instances.
  */
-import { cardToBlockKit, createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { cardToFallbackText, createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
 import { isCardElement, type AdapterPostableMessage, type CardElement } from 'chat';
 
 import { readEnvFile } from '../env.js';
@@ -164,16 +164,15 @@ export function escapeSlackTitle(title: string): string {
 }
 
 /**
- * Slack rejects a header over 150 characters. The bridge's text blocks already
- * fit Slack's per-block cap, so only the header is measured, as the adapter
- * builds it; a longer title moves into the card text under a fixed title.
+ * Slack's header holds 150 characters: older adapters send a longer one and
+ * Slack rejects it, newer ones cut it with an ellipsis. So the title is
+ * measured after emoji expansion, untrimmed, from the adapter's fallback text
+ * (`*title*`); a longer one moves into the card text under a fixed title.
  */
 export function fitsSlackHeader(card: CardElement): boolean {
   if (!card.title) return true;
-  const [header] = cardToBlockKit({ ...card, title: escapeSlackTitle(card.title) }) as Array<{
-    text?: { text?: string };
-  }>;
-  return (header?.text?.text?.length ?? 0) <= 150;
+  const bold = cardToFallbackText({ type: 'card', title: escapeSlackTitle(card.title), children: [] });
+  return bold.length - 2 <= 150;
 }
 
 function withSafeTitle(message: AdapterPostableMessage): AdapterPostableMessage {
