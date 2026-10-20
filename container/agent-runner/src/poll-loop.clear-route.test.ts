@@ -5,9 +5,8 @@
  *    route came from the /clear row, so that message was answered in the
  *    /clear thread;
  *  - the provider folded a message pushed mid-turn into the running turn
- *    (the Claude CLI does this between tool rounds) and answered both with
- *    one result, so the turn queue stayed one entry behind until the query
- *    ended.
+ *    and answered both with one result, so the turn queue stayed one entry
+ *    behind until the query ended.
  */
 import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
@@ -64,9 +63,9 @@ const replied = (text: string) => () => replies().some(([t]) => t === text);
 const labels = (prompt: string) => [...prompt.matchAll(/ask:([\w-]+)/g)].map((m) => m[1]);
 
 /**
- * Models the Claude CLI: a turn told to hold runs a "tool round" until the
- * test releases it; inputs pushed meanwhile are folded into that turn, and
- * its one result reports every input it answered.
+ * Models a provider that folds: a turn told to hold runs a "tool round"
+ * until the test releases it; inputs pushed meanwhile are folded into that
+ * turn, and its one result reports every input it answered.
  */
 class FoldingProvider extends MockProvider {
   queries = 0;

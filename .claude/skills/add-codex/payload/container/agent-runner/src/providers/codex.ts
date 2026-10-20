@@ -140,6 +140,11 @@ export class CodexProvider implements AgentProvider {
     let activeThreadId: string | null = null;
     let activeTurnId: string | null = null;
     let wakeActiveTurn: (() => void) | null = null;
+    // Follow-ups steered into the running turn are answered by its one result,
+    // which reports them as `answeredInputs` so the poll loop's turn queue
+    // stays in step. A rejected steer runs as its own turn, so it is uncounted.
+    let turnSeq = 0;
+    let steered = 0;
 
     const wake = (): void => {
       waiting?.();
@@ -148,7 +153,10 @@ export class CodexProvider implements AgentProvider {
 
     const pushOrSteer = (message: string): void => {
       if (activeServer && activeThreadId && activeTurnId) {
+        const turn = turnSeq;
+        steered++;
         void this.runtime.steerCodexTurn(activeServer, activeThreadId, activeTurnId, message).catch(() => {
+          if (turn === turnSeq) steered--;
           pending.push(message);
           wake();
         });
@@ -194,7 +202,9 @@ export class CodexProvider implements AgentProvider {
           if (pending.length === 0 && ended) return;
 
           const text = pending.shift()!;
-          yield* runOneTurn(
+          turnSeq++;
+          steered = 0;
+          const turnEvents = runOneTurn(
             server,
             threadId,
             text,
@@ -217,6 +227,11 @@ export class CodexProvider implements AgentProvider {
             },
             self.runtime.startCodexTurn,
           );
+          for await (const event of turnEvents) {
+            // Assigned, not typed: a core without the field compiles and ignores it.
+            if (event.type === 'result' && steered > 0) Object.assign(event, { answeredInputs: 1 + steered });
+            yield event;
+          }
         }
       } finally {
         activeTurnId = null;

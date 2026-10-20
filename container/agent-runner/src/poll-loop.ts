@@ -629,8 +629,8 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        // A provider may fold pushes into the running turn (the Claude CLI
-        // does, between tool rounds) and answer them with this one result.
+        // A provider may fold pushes into the running turn and answer them
+        // all with this one result.
         // Retire their queued turns too (at the turn boundary below, so a
         // throw before it still notices them), or every later answer lands
         // one turn behind, in the previous message's thread.

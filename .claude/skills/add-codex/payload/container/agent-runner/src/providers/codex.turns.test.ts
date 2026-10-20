@@ -40,8 +40,39 @@ describe('CodexProvider active turns', () => {
     expect(fake.startCalls[0].inputText).toBe('first prompt');
     expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up prompt' }]);
     expect(events.filter((event) => event.type === 'activity').length).toBeGreaterThanOrEqual(2);
-    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
+    // The one result answers both inputs; the poll loop retires the steered turn.
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'final answer', answeredInputs: 2 },
+    ] as ProviderEvent[]);
     expect(fake.killed).toBe(true);
+  });
+
+  it('counts steered follow-ups per turn, so the next turn reports only itself', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('steered one');
+    query.push('steered two');
+    await waitFor(() => fake.steerCalls.length === 2);
+    fake.completeTurn('first answer');
+    await sleep(0);
+    query.push('next turn');
+    await waitFor(() => fake.startCalls.length === 2);
+    query.end();
+    fake.completeTurn('second answer');
+
+    await collect;
+
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt', 'next turn']);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer', answeredInputs: 3 },
+      { type: 'result', text: 'second answer' },
+    ] as ProviderEvent[]);
   });
 
   it('queues follow-ups for the next turn when steering is rejected', async () => {
