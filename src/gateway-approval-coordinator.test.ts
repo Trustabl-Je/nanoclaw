@@ -208,6 +208,17 @@ describe('gateway approval coordinator', () => {
     expect(await pending).toBe('deny');
   });
 
+  it('denies when the card fails to post', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const failing: ChannelDeliveryAdapter = {
+      async deliver() {
+        throw new Error('platform down');
+      },
+    };
+    await coordinator.startGatewayApprovalCoordinator(provider(), failing, vi.fn());
+    expect(await decide(request())).toBe('deny');
+  });
+
   it('allows a configured read with a long title and no summary without a card', async () => {
     vi.stubEnv('NANOCLAW_GATEWAY_READ_ONLY_HOSTS', 'api.example.test');
     const coordinator = await import('./gateway-approval-coordinator.js');

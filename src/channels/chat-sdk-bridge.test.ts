@@ -823,6 +823,231 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(postedCards(calls).some((card) => card.hasButtons)).toBe(false);
     });
 
+    /** Posts that fail only on the given attempt numbers (1-based), like a platform hiccup. */
+    function flakyPosts(failAttempts: number[]) {
+      const calls: PostCall[] = [];
+      let attempt = 0;
+      const postMessage = async (threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+        attempt += 1;
+        if (failAttempts.includes(attempt)) throw new Error('platform down');
+        calls.push({ threadId, message });
+        return { id: `msg-${calls.length}`, threadId, raw: {} };
+      };
+      return { calls, postMessage };
+    }
+    const stopped = (posted: number, total: number) =>
+      `Request ref q-len stopped after part ${posted} of ${total}. It can't be answered until all its parts and buttons arrive.`;
+    const labelCount = (cards: Array<{ text: string[] }>, i: number) =>
+      cards.filter((card) => /^Request ref q-len, part (\d+) of \d+$/.exec(card.text[0] ?? '')?.[1] === String(i))
+        .length;
+
+    it('notes a request whose posting stopped partway, and still fails', async () => {
+      const { calls, postMessage } = flakyPosts([2]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      const cards = postedCards(calls);
+      const total = Number(/ of (\d+)$/.exec(cards[0].text[0])![1]);
+      expect(cards.map((card) => card.text.at(-1))).toEqual([cards[0].text.at(-1), stopped(1, total)]);
+      expect(cards.some((card) => card.hasButtons)).toBe(false);
+    });
+
+    it('resumes a retry after the parts that already posted', async () => {
+      const { calls, postMessage } = flakyPosts([2]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      await bridge.deliver('slack:D1', null, questionCard(LONG));
+      const cards = postedCards(calls);
+      const parts = cards.filter((card) => card.text[0]?.startsWith('Request ref q-len, part'));
+      const total = parts.length;
+      for (let i = 1; i <= total; i++) expect(labelCount(cards, i)).toBe(1);
+      expect(partText(parts)).toBe(LONG);
+      expect(cards.filter((card) => card.hasButtons)).toHaveLength(1);
+      expect(cards.at(-1)!.hasButtons).toBe(true);
+    });
+
+    it('posts no note when nothing went out yet, and retries from the start', async () => {
+      const { calls, postMessage } = flakyPosts([1]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      expect(calls).toHaveLength(0);
+      await bridge.deliver('slack:D1', null, questionCard(LONG));
+      const cards = postedCards(calls);
+      expect(labelCount(cards, 1)).toBe(1);
+      expect(cards.some((card) => card.text.some((text) => text.includes('stopped after')))).toBe(false);
+    });
+
+    it('notes a request whose buttons failed, and a retry posts only the buttons', async () => {
+      const probe = numberedPosts();
+      await createChatSdkBridge({
+        adapter: stubAdapter({ postMessage: probe.postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      }).deliver('slack:D1', null, questionCard(LONG));
+      const total = probe.calls.length - 1;
+
+      const { calls, postMessage } = flakyPosts([total + 1]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      expect(postedCards(calls).at(-1)!.text).toEqual([stopped(total, total)]);
+      const before = calls.length;
+      await bridge.deliver('slack:D1', null, questionCard(LONG));
+      expect(postedCards(calls.slice(before)).map((card) => card.hasButtons)).toEqual([true]);
+    });
+
+    it('starts over when a retry carries a different request', async () => {
+      const { calls, postMessage } = flakyPosts([2]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      const before = calls.length;
+      const changed = LONG.replace('Line 0', 'Line zero');
+      await bridge.deliver('slack:D1', null, questionCard(changed));
+      const retry = postedCards(calls.slice(before));
+      expect(partText(retry.filter((card) => !card.hasButtons))).toBe(changed);
+    });
+
+    it('tries the note again when it failed to post before', async () => {
+      const { calls, postMessage } = flakyPosts([2, 3, 4]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      const notes = postedCards(calls).filter((card) => card.text[0]?.includes('stopped after'));
+      expect(notes).toHaveLength(1);
+    });
+
+    it('treats a repeat of a delivered request as already delivered', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      const id = await bridge.deliver('slack:D1', null, questionCard(LONG));
+      const posted = calls.length;
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).resolves.toBe(id);
+      expect(calls).toHaveLength(posted);
+    });
+
+    it('posts one copy when the same request is delivered twice at once', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      const [a, b] = await Promise.all([
+        bridge.deliver('slack:D1', null, questionCard(LONG)),
+        bridge.deliver('slack:D1', null, questionCard(LONG)),
+      ]);
+      expect(a).toBe(b);
+      const cards = postedCards(calls);
+      expect(labelCount(cards, 1)).toBe(1);
+      expect(cards.filter((card) => card.hasButtons)).toHaveLength(1);
+    });
+
+    it('starts over when a retry carries different buttons', async () => {
+      const { calls, postMessage } = flakyPosts([2]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      const retry = questionCard(LONG);
+      retry.content.options = ['Reject'];
+      await bridge.deliver('slack:D1', null, retry);
+      expect(labelCount(postedCards(calls), 1)).toBe(2);
+    });
+
+    it('forgets saved parts once the request posts as one card', async () => {
+      const { calls, postMessage } = flakyPosts([2]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      await bridge.deliver('slack:D1', null, questionCard('short'));
+      await bridge.deliver('slack:D1', null, questionCard(LONG));
+      expect(labelCount(postedCards(calls), 1)).toBe(2);
+    });
+
+    it('tells one option with a comma from two options', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      const one = questionCard(LONG);
+      one.content.options = ['Approve, Reject'];
+      await bridge.deliver('slack:D1', null, one);
+      const two = questionCard(LONG);
+      two.content.options = ['Approve', 'Reject'];
+      await bridge.deliver('slack:D1', null, two);
+      expect(postedCards(calls).filter((card) => card.hasButtons)).toHaveLength(2);
+    });
+
+    it('keeps saved parts when a whole card for the same id fails to post', async () => {
+      const { calls, postMessage } = flakyPosts([2, 4]);
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard(LONG))).rejects.toThrow('platform down');
+      await expect(bridge.deliver('slack:D1', null, questionCard('short'))).rejects.toThrow('platform down');
+      await bridge.deliver('slack:D1', null, questionCard(LONG));
+      expect(labelCount(postedCards(calls), 1)).toBe(1);
+    });
+
+    it('reports the failure even when the stopped note hangs', async () => {
+      vi.useFakeTimers();
+      try {
+        let attempt = 0;
+        const postMessage = async (threadId: string): Promise<RawMessage<unknown>> => {
+          attempt += 1;
+          if (attempt === 2) throw new Error('platform down');
+          if (attempt === 3) return new Promise<never>(() => {});
+          return { id: `msg-${attempt}`, threadId, raw: {} };
+        };
+        const bridge = createChatSdkBridge({
+          adapter: stubAdapter({ postMessage }),
+          supportsThreads: false,
+          cardFits: fitsWithin(300),
+        });
+        const delivery = bridge.deliver('slack:D1', null, questionCard(LONG));
+        const outcome = expect(delivery).rejects.toThrow('platform down');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await outcome;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     function editCapture() {
       const edits: PostCall[] = [];
       const editMessage = async (threadId: string, _messageId: string, message: AdapterPostableMessage) => {
