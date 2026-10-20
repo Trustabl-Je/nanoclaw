@@ -782,6 +782,8 @@ async function main(): Promise<void> {
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
       }
+      const ownerHint = res.terminal?.fields.OWNER_HINT;
+      if (ownerHint) notes.push(wrapForGutter(`• ${ownerHint}`, 6));
       if (notes.length > 0) {
         note(notes.join('\n'), "What's left");
       }
@@ -806,6 +808,9 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    // The pending-first-DM ending already names /init-first-agent.
+    const ownerHint = res.terminal?.fields.OWNER_HINT;
+    if (ownerHint && !wiringPending) note(wrapForGutter(ownerHint, 6), 'Owner');
   }
 
   const rows: [string, string][] = [

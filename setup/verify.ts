@@ -141,6 +141,7 @@ export async function run(_args: string[]): Promise<void> {
     'TELEGRAM_BOT_TOKEN',
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
+    'SLACK_SIGNING_SECRET',
     'DISCORD_BOT_TOKEN',
     'GITHUB_TOKEN',
     'LINEAR_API_KEY',
@@ -168,7 +169,9 @@ export async function run(_args: string[]): Promise<void> {
   // Token-based channels
   if (has('DISCORD_BOT_TOKEN')) channelAuth.discord = 'configured';
   if (has('TELEGRAM_BOT_TOKEN')) channelAuth.telegram = 'configured';
-  if (has('SLACK_BOT_TOKEN') && has('SLACK_APP_TOKEN')) channelAuth.slack = 'configured';
+  // Socket Mode needs the app token; webhook delivery uses the signing secret.
+  if (has('SLACK_BOT_TOKEN') && (has('SLACK_APP_TOKEN') || has('SLACK_SIGNING_SECRET')))
+    channelAuth.slack = 'configured';
   if (has('GITHUB_TOKEN')) channelAuth.github = 'configured';
   if (has('LINEAR_API_KEY')) channelAuth.linear = 'configured';
   if (has('GCHAT_CREDENTIALS')) channelAuth.gchat = 'configured';
@@ -189,7 +192,8 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
+  const { registeredGroups, derivedGroups, owners, approvers, wiredChannels, droppedChannels } =
+    await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
@@ -231,6 +235,20 @@ export async function run(_args: string[]): Promise<void> {
   const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
   const slackReason = slackJobFailure(slackJob);
 
+  // Only an owner or admin can approve a new chat; init-cli-agent creates
+  // neither, so a terminal-only install passes with no owner. A set-up channel
+  // with nobody to approve warns, and fails once it drops messages with no
+  // wired chat. Drops are never cleared, so only set-up channels count.
+  const chatChannels = [...new Set([...configuredChannels, ...wiredChannels])].sort();
+  const droppingChannels =
+    approvers > 0 ? [] : droppedChannels.filter((c) => configuredChannels.includes(c) && !wiredChannels.includes(c));
+  const ownerHint =
+    approvers > 0 || chatChannels.length === 0
+      ? ''
+      : droppingChannels.length > 0
+        ? `Messages on ${droppingChannels.join(', ')} are being dropped: no owner is set to approve them. Run /init-first-agent in Claude Code to add one.`
+        : `No owner is set, so nobody can approve new chats on ${chatChannels.join(', ')}. Run /init-first-agent in Claude Code to add one.`;
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
@@ -240,6 +258,7 @@ export async function run(_args: string[]): Promise<void> {
     wiringPending,
     slackInstall,
     configuredChannels,
+    droppingChannels,
   });
 
   log.info('Verification complete', {
@@ -247,6 +266,8 @@ export async function run(_args: string[]): Promise<void> {
     channelAuth,
     wiringPending,
     slackInstall,
+    owners,
+    droppingChannels,
     imageSource,
     imageSourceActual: image.source,
     derivedGroups,
@@ -275,6 +296,9 @@ export async function run(_args: string[]): Promise<void> {
     ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
     ...(slackReason ? { SLACK_INSTALL_REASON: slackReason } : {}),
     ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
+    OWNER: owners > 0 ? 'present' : 'missing',
+    ...(ownerHint ? { OWNER_HINT: ownerHint } : {}),
+    ...(droppingChannels.length > 0 ? { DROPPED_CHANNELS: droppingChannels.join(',') } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -306,11 +330,14 @@ export function determineVerifyStatus(input: {
   wiringPending?: boolean;
   slackInstall?: SlackJob['status'];
   configuredChannels?: string[];
+  /** Channels with no wired chat whose messages are dropped, with no owner or admin to approve them. */
+  droppingChannels?: string[];
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
     input.slackInstall !== 'failed' &&
     input.slackInstall !== 'expired' &&
+    !input.droppingChannels?.length &&
     (input.registeredGroups > 0 ||
       input.wiringPending === true ||
       canDeferSlackWiring(input.slackInstall, input.configuredChannels ?? []))
