@@ -767,6 +767,29 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(cards.at(-1)!.hasButtons).toBe(true);
     });
 
+    it("keeps an agent's own markup when its question overflows", async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+        cardFits: fitsWithin(300),
+      });
+      const question = '**Pick** one & go\n'.repeat(40);
+      await bridge.deliver('slack:D1', null, {
+        kind: 'chat-sdk',
+        content: {
+          type: 'ask_question',
+          fromAgent: true,
+          questionId: 'q-len',
+          title: CARD_TITLE,
+          question,
+          options: ['Yes'],
+        },
+      });
+      expect(partText(postedCards(calls).slice(0, -1))).toBe(question);
+    });
+
     it('posts nothing when the text cannot fit even split', async () => {
       const { calls, postMessage } = numberedPosts();
       const bridge = createChatSdkBridge({
