@@ -778,6 +778,36 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(calls).toHaveLength(0);
     });
 
+    it('refuses a card that would need more than 5 parts, posting nothing', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      await expect(bridge.deliver('slack:D1', null, questionCard('w'.repeat(3000)))).rejects.toThrow(
+        'the request is too long to show in full on this channel',
+      );
+      expect(calls).toHaveLength(0);
+      await bridge.deliver('slack:D1', null, questionCard('w'.repeat(1000)));
+      expect(postedCards(calls).filter((card) => !card.hasButtons).length).toBeLessThanOrEqual(5);
+    });
+
+    it('refuses with the channel reason when no smaller split can be made', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        cardFits: fitsWithin(300),
+      });
+      // Fits one 2,000 block, but a 300-backtick run can't be cut at the smaller sizes.
+      const question = `${'x'.repeat(10)}\n${'`'.repeat(300)}`;
+      await expect(bridge.deliver('slack:D1', null, questionCard(question))).rejects.toThrow(
+        'the request is too long to show in full on this channel',
+      );
+      expect(calls).toHaveLength(0);
+    });
+
     it('posts nothing when even the short card with the buttons cannot fit', async () => {
       const { calls, postMessage } = numberedPosts();
       const bridge = createChatSdkBridge({
@@ -1122,22 +1152,26 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(editedTexts()).toEqual(['Approved']);
     });
 
-    it('still removes the buttons when the resolution alone does not fit', async () => {
+    it('keeps the decision and who made it when the resolution alone does not fit', async () => {
       const { editMessage, editedTexts } = editCapture();
       const bridge = createChatSdkBridge({
         adapter: stubAdapter({ editMessage }),
         supportsThreads: false,
         maxCardTextLength: 300,
       });
+      const resolution = `Approved by ann ${'a'.repeat(400)}`;
       await bridge.deliver('slack:D1', null, {
         kind: 'chat-sdk',
         content: {
           operation: 'edit',
           messageId: 'msg-1',
-          terminalCard: { title: CARD_TITLE, question: 'x', resolution: 'r'.repeat(301) },
+          terminalCard: { title: CARD_TITLE, question: 'x', resolution },
         },
       });
-      expect(editedTexts()).toEqual(['Resolved.']);
+      const [text] = editedTexts() as string[];
+      expect(text.startsWith('Approved by ann aaa')).toBe(true);
+      expect(text.endsWith('…')).toBe(true);
+      expect(text.length).toBeLessThanOrEqual(300);
     });
   });
 });

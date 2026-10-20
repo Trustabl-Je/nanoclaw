@@ -482,9 +482,10 @@ interface QuestionCardPlan {
 
 /** Title for the button card when the request's own title doesn't fit it. */
 const OVERFLOW_TITLE = 'Approval request';
-/** Smallest text block an overflow split goes down to, and the most parts, before giving up. */
+/** Smallest text block an overflow split goes down to before giving up. */
 const MIN_OVERFLOW_BLOCK = 250;
-const MAX_OVERFLOW_PARTS = 20;
+/** Each part is a message: more risks chat rate limits and is too long to review in a chat. */
+const MAX_OVERFLOW_PARTS = 5;
 const overflowNotice = (ref: string, parts: number) =>
   `The full request is in the ${parts === 1 ? 'message' : `${parts} messages`} marked ref ${ref} above.`;
 const stoppedNotice = (ref: string, posted: number, parts: number) =>
@@ -630,7 +631,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const partTitle = fits(textCard(title, [widest])) ? title : OVERFLOW_TITLE;
     const body = partTitle === title ? question : `${title}\n\n${question}`;
     for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
-      const parts = packParts(partTitle, questionId, splitCardText(body, escape, limit));
+      const blocks = splitIfPossible(body, escape, limit);
+      const parts = blocks && packParts(partTitle, questionId, blocks);
       if (!parts) continue;
       const notice = [cardText(overflowNotice(questionId, parts.length))];
       const cardTitle = [title, OVERFLOW_TITLE].find((t) => fits(withButtons(t, notice)));
@@ -638,6 +640,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       return { parts, card: withButtons(cardTitle, notice), title: cardTitle, text: notice.join('\n') };
     }
     throw new CardTooLongError('the request is too long to show in full on this channel');
+  }
+
+  /** A split that can't be made at this size yields nothing, so a smaller size is tried next. */
+  function splitIfPossible(text: string, escape: (t: string) => string, limit: number): string[] | undefined {
+    try {
+      return splitCardText(text, escape, limit);
+    } catch (err) {
+      if (err instanceof CardTooLongError) return undefined;
+      throw err;
+    }
   }
 
   /**
@@ -771,7 +783,20 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (fits(buildTerminalApprovalCard(short))) return terminalApprovalMessage(short);
       }
     }
-    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: cardText('Resolved.') });
+    // Nothing else fits: keep the start of the resolution (the decision and who made it).
+    const raw = spec.resolution;
+    const shortened = (n: number) =>
+      cardText(`${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`);
+    const fitsShortened = (n: number) =>
+      fits(buildTerminalApprovalCard({ title: '', question: '', questionBlocks: [], resolution: shortened(n) }));
+    let lo = 0;
+    let hi = raw.length - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fitsShortened(mid)) lo = mid;
+      else hi = mid - 1;
+    }
+    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: shortened(lo) });
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
