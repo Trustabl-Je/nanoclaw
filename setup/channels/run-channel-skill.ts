@@ -27,7 +27,8 @@ import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
-import { launchSlackJob, readSlackJob, queueSlackJob } from '../../src/community-portal/slack-job.js';
+import { readEnvFile } from '../../src/env.js';
+import { launchSlackJob, readSlackJob, queueSlackJob, settleSlackJob } from '../../src/community-portal/slack-job.js';
 import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
@@ -64,13 +65,13 @@ export function companionSkillPresent(skill: string, projectRoot: string): boole
  *
  * A companion that doesn't fully apply degrades, not fails: the channel's
  * main install still works, so warn with the exact re-apply command instead
- * of aborting setup.
+ * of aborting setup. Resolves true only when nothing degraded.
  */
 async function applyCompanionSkills(
   channel: string,
   projectRoot: string,
   overrides: ChannelSkillOverrides,
-): Promise<void> {
+): Promise<boolean> {
   const companions = getCompanionSkills(channel);
   let applied = false;
   let degraded = false;
@@ -112,7 +113,7 @@ async function applyCompanionSkills(
 
   if (degraded && overrides.requireCompanions)
     throw new Error(`The ${channel} companion installation needs attention. Resume its setup step.`);
-  if (!applied) return;
+  if (!applied) return !degraded;
   if (degraded) {
     // A half-applied companion may have copied files and appended barrel
     // imports before failing its build or tests — restarting could boot that
@@ -122,9 +123,9 @@ async function applyCompanionSkills(
       'Skipping the deferred service restart: a companion skill did not fully apply. ' +
         'Re-apply it with the command above, then restart: bash setup/lib/restart.sh',
     );
-    return;
+    return false;
   }
-  if (overrides.skipEffects?.includes('restart')) return;
+  if (overrides.skipEffects?.includes('restart')) return true;
   try {
     await (overrides.exec ?? hostExec(projectRoot))('bash setup/lib/restart.sh');
   } catch {
@@ -134,7 +135,9 @@ async function applyCompanionSkills(
     );
     if (overrides.requireCompanions)
       throw new Error('The Slack service restart needs attention. Resume the Slack setup step.');
+    return false;
   }
+  return true;
 }
 
 interface WireArgs {
@@ -328,7 +331,7 @@ export async function runChannelSkill(
   // Declared companion skills: apply the rest of the channel's payload (see
   // setup/channels/companions.ts). After the main install, so files the
   // companions edit or import already exist.
-  await applyCompanionSkills(channel, projectRoot, overrides);
+  const companionsApplied = await applyCompanionSkills(channel, projectRoot, overrides);
 
   // Identity confirmation captured by the skill (e.g. add-slack's auth.test).
   if (res.vars.connected_as) p.log.success(`Connected to ${channel} as ${res.vars.connected_as}.`);
@@ -377,6 +380,19 @@ export async function runChannelSkill(
       `Couldn't finish connecting ${agentName}.`,
       'You can retry later with `/init-first-agent`.',
     );
+  }
+  // Finish a saved background Slack job this run completed, or verify keeps
+  // failing on it. Socket Mode connects with the app token, so a match is the
+  // job's app even after a reinstall; a webhook run leaves any old one in
+  // .env. The job also needs every companion, so a degraded one keeps it.
+  if (channel === 'slack' && companionsApplied && ['socket', 'provisioned'].includes(res.vars.connection ?? '')) {
+    try {
+      await settleSlackJob(readEnvFile(['SLACK_APP_TOKEN'], projectRoot).SLACK_APP_TOKEN, projectRoot);
+    } catch {
+      p.log.warn(
+        'Slack is connected, but the saved background install (data/slack-install.json) could not be updated.',
+      );
+    }
   }
   // Idempotently clear any legacy/re-exec template pick after the targeted
   // wire succeeds. Pinned by run-channel-skill.test.ts.

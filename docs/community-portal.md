@@ -71,7 +71,8 @@ Recovery:
 
 - Retry a failed job, or resume the Slack step after fixing what it reported:
   `pnpm exec tsx setup/portal.ts --stage slack`. The saved app is reused; a resumed setup never
-  creates a duplicate.
+  creates a duplicate. When that run connects Slack with the saved app, the job is marked complete
+  and verification passes again.
 - Re-check and resume the worker: `pnpm exec tsx setup/index.ts --step verify`.
 - After the seven-day window expires the job is marked expired. Review or revoke the old app in
   the portal, then start a new installation with the command above.
