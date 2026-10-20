@@ -767,8 +767,25 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
   // The resolved card replaces the buttons: the full request when it fits,
   // else the request ref (its overflow parts carry it) and the resolution.
+  /** The longest start of a resolution, escaped and ending in "…", that `ok` accepts. */
+  const shortenResolution = (raw: string, ok: (resolution: string) => boolean) => {
+    const shortened = (n: number) =>
+      cardText(`${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`);
+    let lo = 0;
+    let hi = raw.length - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (ok(shortened(mid))) lo = mid;
+      else hi = mid - 1;
+    }
+    return shortened(lo);
+  };
+
   const terminalMessage = (spec: TerminalApprovalCard, questionId?: string) => {
-    const resolution = cardText(spec.resolution);
+    // One text block; a longer resolution keeps its start (the decision and who made it).
+    const withinBlock = (r: string) => r.length <= CARD_TEXT_BLOCK_LENGTH;
+    const escaped = cardText(spec.resolution);
+    const resolution = withinBlock(escaped) ? escaped : shortenResolution(spec.resolution, withinBlock);
     const full: TerminalApprovalCard = {
       ...spec,
       question: cardText(spec.question),
@@ -783,20 +800,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (fits(buildTerminalApprovalCard(short))) return terminalApprovalMessage(short);
       }
     }
-    // Nothing else fits: keep the start of the resolution (the decision and who made it).
-    const raw = spec.resolution;
-    const shortened = (n: number) =>
-      cardText(`${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`);
-    const fitsShortened = (n: number) =>
-      fits(buildTerminalApprovalCard({ title: '', question: '', questionBlocks: [], resolution: shortened(n) }));
-    let lo = 0;
-    let hi = raw.length - 1;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (fitsShortened(mid)) lo = mid;
-      else hi = mid - 1;
-    }
-    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: shortened(lo) });
+    // Nothing else fits: keep the start of the resolution.
+    const last = shortenResolution(
+      spec.resolution,
+      (r) =>
+        withinBlock(r) &&
+        fits(buildTerminalApprovalCard({ title: '', question: '', questionBlocks: [], resolution: r })),
+    );
+    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: last });
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
@@ -1038,12 +1049,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
+          // Always a card: escaped resolution and the same fit checks, with or without a stored question.
           await adapter.editMessage(
             tid,
             event.messageId,
-            render?.question
-              ? terminalMessage({ title, question: render.question, resolution }, questionId)
-              : { markdown: `${title}\n\n${resolution}` },
+            terminalMessage({ title, question: render?.question ?? '', resolution }, questionId),
           );
         } catch (err) {
           log.warn('Failed to update card after action', { err });

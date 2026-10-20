@@ -1175,6 +1175,25 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(editedTexts()).toEqual(['Approved']);
     });
 
+    it('keeps a resolution longer than one text block to its start', async () => {
+      const { editMessage, editedTexts } = editCapture();
+      const bridge = createChatSdkBridge({ adapter: stubAdapter({ editMessage }), supportsThreads: false });
+      const resolution = `Approved by ann ${'y'.repeat(3001)}`;
+      await bridge.deliver('slack:D1', null, {
+        kind: 'chat-sdk',
+        content: {
+          operation: 'edit',
+          messageId: 'msg-1',
+          terminalCard: { title: CARD_TITLE, question: 'x', resolution },
+        },
+      });
+      const texts = editedTexts() as string[];
+      expect(texts[0]).toBe('x');
+      expect(texts[1].startsWith('Approved by ann yyy')).toBe(true);
+      expect(texts[1].endsWith('…')).toBe(true);
+      expect(texts[1].length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    });
+
     it('keeps the decision and who made it when the resolution alone does not fit', async () => {
       const { editMessage, editedTexts } = editCapture();
       const bridge = createChatSdkBridge({
@@ -1589,6 +1608,58 @@ it('keeps a clicked card short when its request was posted above it', async () =
       'Request ref click-overflow',
       'Approved by ann',
     ]);
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+it('edits a clicked card with no stored question into an escaped card, not raw markdown', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'click-plain'
+      ? { title: '<!channel> Pick one', options: [{ label: 'Yes', selectedLabel: '<!here> Yes', value: 'yes' }] }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({
+    adapter,
+    instance: 'fixture-three',
+    supportsThreads: false,
+    escapeCardText: (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+  });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:click-plain:0',
+        adapter,
+        messageId: 'button-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected', userName: 'ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    const edited = editMessage.mock.calls[0][2] as {
+      markdown?: string;
+      card?: { title: string; children: Array<{ content?: string }> };
+    };
+    expect(edited.markdown).toBeUndefined();
+    // The resolution is card text, so it's escaped; each channel escapes card titles itself.
+    expect(edited.card?.title).toBe('<!channel> Pick one');
+    expect(edited.card?.children.map((child) => child.content)).toEqual(['&lt;!here&gt; Yes by ann']);
   } finally {
     await bridge.teardown();
     await closeDb();
