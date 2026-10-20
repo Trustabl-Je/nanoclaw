@@ -266,4 +266,24 @@ describe('/clear batched with accumulated context only', () => {
       ['re: q', 'thread-q'],
     ]);
   });
+
+  it('keeps the context pending beside /upload-trace, for the next message', async () => {
+    const provider = new FoldingProvider();
+    insertMessage('ctx', 'ambient ask:ctx', 'thread-q', 0);
+    insertMessage('upload', '/upload-trace', 'thread-upload');
+    const stop = startLoop(provider);
+    try {
+      await waitFor(() => replies().some(([, thread]) => thread === 'thread-upload'));
+      await sleep(1200);
+      expect(provider.queries).toBe(0);
+      const ack = getOutboundDb().prepare(`SELECT status FROM processing_ack WHERE message_id = 'ctx'`).get();
+      expect(ack).toBeNull();
+
+      insertMessage('q', 'ask:q', 'thread-q');
+      await waitFor(replied('re: ctx + q'));
+    } finally {
+      await stop();
+    }
+    expect(replies().at(-1)).toEqual(['re: ctx + q', 'thread-q']);
+  });
 });

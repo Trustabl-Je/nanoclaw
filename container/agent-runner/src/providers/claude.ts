@@ -70,6 +70,9 @@ export function classifyRateLimitEvent(
 
 export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
 
+/** Most entries a result's `user_message_uuids` carries (the SDK caps it). */
+const USER_MESSAGE_UUIDS_MAX = 64;
+
 interface SDKUserMessage {
   type: 'user';
   message: { role: 'user'; content: string };
@@ -379,6 +382,7 @@ export class ClaudeProvider implements AgentProvider {
             errors?: string[];
             user_message_uuids?: string[];
             user_message_uuid?: string;
+            queued_turn_count?: number;
           };
           const isError = m.is_error === true;
           // Older CLIs echo no uuids: count the result as answering one input.
@@ -389,6 +393,13 @@ export class ClaudeProvider implements AgentProvider {
             if (at === -1) continue;
             unanswered.splice(at, 1);
             answeredInputs++;
+          }
+          // The list keeps only the first 64 inputs a turn consumed. Past
+          // that, every older input the CLI no longer holds queued was folded.
+          if (consumed.length >= USER_MESSAGE_UUIDS_MAX && m.queued_turn_count !== undefined) {
+            const unlisted = Math.max(unanswered.length - m.queued_turn_count, 0);
+            unanswered.splice(0, unlisted);
+            answeredInputs += unlisted;
           }
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
           // the SDK's own notice in `result`. Other result text can echo upstream
