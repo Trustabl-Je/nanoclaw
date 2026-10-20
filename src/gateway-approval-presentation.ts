@@ -8,9 +8,10 @@ const safeMultiline = (text: string) =>
 const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
 /**
- * Channels cap or clip card titles (the tightest at 60), some after expanding
- * emoji names. A longer title or action goes in full into the body, which
- * channels post whole, under a fixed title.
+ * A rough cap, counted before escaping: channels cap or clip titles (the
+ * tightest at 60), some after expanding emoji names. A longer title or action
+ * goes in full into the body under a fixed title; a channel with cardFits
+ * measures the real title and falls back to a fixed one too.
  */
 export const MAX_CARD_TITLE_CHARS = 60;
 
