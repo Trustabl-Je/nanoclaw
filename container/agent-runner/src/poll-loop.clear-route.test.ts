@@ -76,6 +76,8 @@ class FoldingProvider extends MockProvider {
   inputs: string[] = [];
   /** Turns currently in a held tool round. */
   holding = 0;
+  /** The next result is a provider failure. */
+  failNext = false;
   private holds: Array<Promise<void>> = [];
 
   /** Make the next turn hold until the returned release is called. */
@@ -111,9 +113,15 @@ class FoldingProvider extends MockProvider {
           answered.push(...inbox.splice(0));
         }
         if (aborted) return;
+        const folded = answered.length > 1 ? { answeredInputs: answered.length } : {};
+        if (self.failNext) {
+          self.failNext = false;
+          yield { type: 'result', text: null, isError: true, error: 'Turn failed.', ...folded };
+          continue;
+        }
         const text = `<message to="slack-test">re: ${answered.flatMap(labels).join(' + ')}</message>`;
         yield { type: 'text', text };
-        yield { type: 'result', text, ...(answered.length > 1 ? { answeredInputs: answered.length } : {}) };
+        yield { type: 'result', text, ...folded };
       }
     })();
     return {
@@ -241,6 +249,32 @@ describe('reply threads after /clear — every arrival order', () => {
       });
     }
   }
+});
+
+describe('a failed turn with a folded message', () => {
+  it('sends the failure notice to each folded thread too, then answers the next message in its own', async () => {
+    const provider = new FoldingProvider();
+    const release = provider.hold();
+    insertMessage('a', 'ask:a', 'thread-a');
+    const stop = startLoop(provider);
+    try {
+      await waitFor(() => provider.holding === 1);
+      insertMessage('b', 'ask:b', 'thread-b');
+      await waitFor(pushed(provider, 'b'));
+      provider.failNext = true;
+      release();
+      await waitFor(() => replies().length >= 2);
+      insertMessage('c', 'ask:c', 'thread-c');
+      await waitFor(replied('re: c'));
+    } finally {
+      await stop();
+    }
+    expect(replies()).toEqual([
+      ['Turn failed.', 'thread-a'],
+      ['Turn failed.', 'thread-b'],
+      ['re: c', 'thread-c'],
+    ]);
+  });
 });
 
 describe('/clear batched with accumulated context only', () => {

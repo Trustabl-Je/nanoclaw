@@ -634,9 +634,9 @@ export async function processQuery(
         // Retire their queued turns too, or every later answer lands one
         // turn behind, in the previous message's thread.
         const folded = Math.min(Math.max((event.answeredInputs ?? 1) - 1, 0), queuedTurns.length);
+        const foldedTurns = queuedTurns.splice(0, folded);
         if (folded > 0) {
           log(`Result answered ${folded} queued turn(s) folded into this one`);
-          queuedTurns.splice(0, folded);
           archivePrompts.splice(0, folded + 1, archivePrompts.slice(0, folded + 1).join('\n\n'));
         }
         const resultText = event.text ?? '';
@@ -671,6 +671,13 @@ export async function processQuery(
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
+            // Requests folded into the failed turn failed with it.
+            const noticed = [routing];
+            for (const { routing: target } of foldedTurns) {
+              if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
+              noticed.push(target);
+              await deliverErrorResult(target, notice);
+            }
           }
           // An unwrapped final text only warrants the wrap-nudge when no
           // <message> block was delivered this turn. If a reply already went
@@ -758,16 +765,7 @@ export async function processQuery(
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
-        if (
-          noticed.some(
-            (prior) =>
-              prior.platformId === target.platformId &&
-              prior.channelType === target.channelType &&
-              prior.threadId === target.threadId &&
-              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
-          )
-        )
-          continue;
+        if (noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
         noticed.push(target);
         try {
           await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
@@ -827,6 +825,20 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 function sendsFailureNotice(routing: RoutingContext): boolean {
   return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
+}
+
+/**
+ * Would a failure notice on `b` repeat one already sent on `a`? One notice
+ * per thread is enough; the host picks an a2a reply's session by
+ * in_reply_to, so agent routes also compare it.
+ */
+function sameNoticeRoute(a: RoutingContext, b: RoutingContext): boolean {
+  return (
+    a.platformId === b.platformId &&
+    a.channelType === b.channelType &&
+    a.threadId === b.threadId &&
+    (b.channelType !== 'agent' || a.inReplyTo === b.inReplyTo)
+  );
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
