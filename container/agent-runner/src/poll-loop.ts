@@ -164,10 +164,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       (m.kind === 'chat' || m.kind === 'chat-sdk') && !isSessionEcho(m) && isUploadTraceCommand(m);
     const isCommand = (m: MessageInRow) => isClear(m) || isUploadTrace(m);
     // Context rows beside a command never wake a turn on their own (the
-    // accumulate gate above): /clear drops them with the session, any other
-    // command leaves them pending for the next message.
+    // accumulate gate above): they stay pending for the next message.
     const runsTurn = messages.some((m) => m.trigger === 1 && !isCommand(m));
-    const batch = runsTurn || messages.some(isClear) ? messages : messages.filter(isCommand);
+    const batch = runsTurn ? messages : messages.filter(isCommand);
     const ids = batch.map((m) => m.id);
     markProcessing(ids);
 
@@ -215,8 +214,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (!runsTurn) {
-      const remainingIds = ids.filter((id) => !commandIds.includes(id));
-      if (remainingIds.length > 0) markCompleted(remainingIds);
       log(`All ${commandIds.length} triggering message(s) were commands, skipping query`);
       continue;
     }

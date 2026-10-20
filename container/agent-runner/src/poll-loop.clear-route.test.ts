@@ -301,47 +301,27 @@ describe('a failed turn with a folded message', () => {
   });
 });
 
-describe('/clear batched with accumulated context only', () => {
-  it('starts no turn for the context, which is cleared with the session', async () => {
-    const provider = new FoldingProvider();
-    insertMessage('ctx', 'ambient ask:ctx', 'thread-ctx', 0);
-    insertMessage('clear', '/clear', 'thread-clear');
-    const stop = startLoop(provider);
-    try {
-      await waitFor(replied('Session cleared.'));
-      await sleep(1200);
-      expect(provider.queries).toBe(0);
-      const ack = getOutboundDb().prepare(`SELECT status FROM processing_ack WHERE message_id = 'ctx'`).get();
-      expect(ack).toEqual({ status: 'completed' });
+describe('a command batched with accumulated context only', () => {
+  for (const command of ['/clear', '/upload-trace']) {
+    it(`${command}: starts no turn for the context, which rides along with the next message`, async () => {
+      const provider = new FoldingProvider();
+      insertMessage('ctx', 'ambient ask:ctx', 'thread-ctx', 0);
+      insertMessage('cmd', command, 'thread-cmd');
+      const stop = startLoop(provider);
+      try {
+        await waitFor(() => replies().some(([, thread]) => thread === 'thread-cmd'));
+        await sleep(1200);
+        expect(provider.queries).toBe(0);
+        const ack = getOutboundDb().prepare(`SELECT status FROM processing_ack WHERE message_id = 'ctx'`).get();
+        expect(ack).toBeNull();
 
-      insertMessage('q', 'ask:q', 'thread-q');
-      await waitFor(replied('re: q'));
-    } finally {
-      await stop();
-    }
-    expect(replies()).toEqual([
-      ['Session cleared.', 'thread-clear'],
-      ['re: q', 'thread-q'],
-    ]);
-  });
-
-  it('keeps the context pending beside /upload-trace, for the next message', async () => {
-    const provider = new FoldingProvider();
-    insertMessage('ctx', 'ambient ask:ctx', 'thread-ctx', 0);
-    insertMessage('upload', '/upload-trace', 'thread-upload');
-    const stop = startLoop(provider);
-    try {
-      await waitFor(() => replies().some(([, thread]) => thread === 'thread-upload'));
-      await sleep(1200);
-      expect(provider.queries).toBe(0);
-      const ack = getOutboundDb().prepare(`SELECT status FROM processing_ack WHERE message_id = 'ctx'`).get();
-      expect(ack).toBeNull();
-
-      insertMessage('q', 'ask:q', 'thread-q');
-      await waitFor(replied('re: ctx + q'));
-    } finally {
-      await stop();
-    }
-    expect(replies().at(-1)).toEqual(['re: ctx + q', 'thread-q']);
-  });
+        insertMessage('q', 'ask:q', 'thread-q');
+        await waitFor(replied('re: ctx + q'));
+      } finally {
+        await stop();
+      }
+      // The context sorts first, but the reply goes where the turn was woken.
+      expect(replies().at(-1)).toEqual(['re: ctx + q', 'thread-q']);
+    });
+  }
 });
