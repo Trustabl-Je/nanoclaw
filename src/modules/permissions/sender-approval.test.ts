@@ -277,6 +277,35 @@ describe('unknown-sender request_approval flow', () => {
     expect(member !== undefined).toBe(outcomes[0] === 'accepted');
   });
 
+  it('reports an approval accepted once it is recorded, before the held message is replayed', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('early please')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    // The replay's wake is slow (a cold start).
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const outcome = await Promise.race([
+      dispatchResponse({
+        questionId: pending.id,
+        value: 'approve',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(outcome).toBe('accepted');
+  });
+
   it('keeps the request pending when adding the member fails', async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');

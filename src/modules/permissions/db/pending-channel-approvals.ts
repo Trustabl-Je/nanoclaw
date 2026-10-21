@@ -114,6 +114,10 @@ export async function restorePendingChannelApprovalCard(row: PendingChannelAppro
   );
 }
 
-export async function deletePendingChannelApproval(messagingGroupId: string): Promise<void> {
-  await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId);
+/** False when the row was already gone (another response took it). */
+export async function deletePendingChannelApproval(messagingGroupId: string): Promise<boolean> {
+  return (
+    (await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId))
+      .changes > 0
+  );
 }

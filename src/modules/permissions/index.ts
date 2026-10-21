@@ -315,6 +315,8 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<R
     return true;
   });
   if (!claimed) return 'ignored';
+  // Recorded: the card can show it while the held message is replayed.
+  payload.accepted?.();
 
   if (approved) {
     log.info('Unknown sender approved — member added', {
@@ -365,7 +367,8 @@ async function wireApprovedChannel(
   row: PendingChannelApproval,
   agentGroupId: string,
   approverId: string,
-): Promise<boolean> {
+  accepted?: () => void,
+): Promise<ResponseOutcome> {
   let event: InboundEvent;
   try {
     event = JSON.parse(row.original_message) as InboundEvent;
@@ -375,7 +378,7 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
-    return false;
+    return 'closed';
   }
 
   const mg = await getMessagingGroup(row.messaging_group_id);
@@ -398,25 +401,43 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
-    return false;
+    return 'closed';
   }
 
   const mgaId = `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await createMessagingGroupAgent({
-    id: mgaId,
-    messaging_group_id: row.messaging_group_id,
-    agent_group_id: agentGroupId,
-    engage_mode: engage.engage_mode,
-    engage_pattern: engage.engage_pattern,
-    // Deliberate card-flow choices, not channel defaults: the triggering
-    // sender is auto-admitted below, so 'known' keeps other strangers gated;
-    // 'accumulate' / 'shared' / priority 0 are the flow's fixed semantics.
-    sender_scope: 'known',
-    ignored_message_policy: 'accumulate',
-    session_mode: 'shared',
-    priority: 0,
-    created_at: new Date().toISOString(),
+  // Deleting the row claims the choice: of two, only one wires the channel. One
+  // transaction with the wiring, so a failed write keeps the request.
+  const claimed = await getDb().transaction(async () => {
+    if (!(await deletePendingChannelApproval(row.messaging_group_id))) return false;
+    await createMessagingGroupAgent({
+      id: mgaId,
+      messaging_group_id: row.messaging_group_id,
+      agent_group_id: agentGroupId,
+      engage_mode: engage.engage_mode,
+      engage_pattern: engage.engage_pattern,
+      // Deliberate card-flow choices, not channel defaults: the triggering
+      // sender is auto-admitted below, so 'known' keeps other strangers gated;
+      // 'accumulate' / 'shared' / priority 0 are the flow's fixed semantics.
+      sender_scope: 'known',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    const senderUserId = await extractAndUpsertUser(event);
+    if (senderUserId) {
+      await addMember({
+        user_id: senderUserId,
+        agent_group_id: agentGroupId,
+        added_by: approverId,
+        added_at: new Date().toISOString(),
+      });
+    }
+    return true;
   });
+  if (!claimed) return 'ignored';
+  // Recorded: the card can show it while the message is replayed.
+  accepted?.();
   log.info('Channel registration approved — wiring created', {
     messagingGroupId: row.messaging_group_id,
     agentGroupId,
@@ -424,18 +445,6 @@ async function wireApprovedChannel(
     engageMode: engage.engage_mode,
     approverId,
   });
-
-  const senderUserId = await extractAndUpsertUser(event);
-  if (senderUserId) {
-    await addMember({
-      user_id: senderUserId,
-      agent_group_id: agentGroupId,
-      added_by: approverId,
-      added_at: new Date().toISOString(),
-    });
-  }
-
-  await deletePendingChannelApproval(row.messaging_group_id);
 
   try {
     await routeInbound(event);
@@ -445,7 +454,7 @@ async function wireApprovedChannel(
       err,
     });
   }
-  return true;
+  return 'accepted';
 }
 
 /**
@@ -641,8 +650,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
 
   // ── Wire + replay (shared path for connect and create) ──
-  // A failed wiring drops the row: the request is gone.
-  return (await wireApprovedChannel(row, targetAgentGroupId, approverId)) ? 'accepted' : 'closed';
+  // A failed wiring drops the row (closed); another choice may have won (ignored).
+  return wireApprovedChannel(row, targetAgentGroupId, approverId, payload.accepted);
 }
 
 registerResponseHandler(handleChannelApprovalResponse);
@@ -686,7 +695,7 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     folder: ag.folder,
   });
 
-  const wired = await wireApprovedChannel(row, ag.id, userId);
+  const wired = (await wireApprovedChannel(row, ag.id, userId)) === 'accepted';
 
   const adapter = getDeliveryAdapter();
   if (adapter) {

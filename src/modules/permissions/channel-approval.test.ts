@@ -611,6 +611,59 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(1);
   });
 
+  it('wires a channel once when two choices race', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const connect = () =>
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([connect(), connect()]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    expect(
+      await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?', questionId),
+    ).toBe(1);
+  });
+
+  it('reports a connect accepted once the wiring is recorded, before the message is replayed', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-early')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const outcome = await Promise.race([
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(outcome).toBe('accepted');
+  });
+
   it('counts only the card the registration points at: an old card or a copy is ignored after the agent choice', async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');

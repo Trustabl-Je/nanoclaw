@@ -82,11 +82,18 @@ function extractText(event: InboundEvent): string {
  * finalize outright. Prompts the admin's DM, then parks the row and arms
  * capture. If we can't reach the admin (no DM, no adapter, delivery throws) we
  * finalize a plain reject immediately rather than strand the requesting agent.
- * Returns false when another response already claimed the row.
+ * Returns false when another response already claimed the row; `accepted` is
+ * told once the hold is recorded, before the prompt goes out.
  */
-export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<boolean> {
+export async function armReasonCapture(
+  approval: PendingApproval,
+  session: Session,
+  userId: string,
+  accepted?: () => void,
+): Promise<boolean> {
   const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
   if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return false;
+  accepted?.();
 
   const channelType = approval.channel_type;
   const platformId = approval.platform_id;

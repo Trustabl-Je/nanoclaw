@@ -24,7 +24,8 @@ import { notifyApprovalResolved } from './primitive.js';
  * When `reason` is provided it's appended to the agent-facing note with generic
  * attribution — the why, not the who (the rejecting admin may belong to a
  * different owner than the requesting agent). Callers are responsible for
- * clamping the reason length before passing it in.
+ * clamping the reason length before passing it in. `accepted` is told once the
+ * reject is recorded, before the agent is notified and woken.
  */
 export async function finalizeReject(
   approval: PendingApproval,
@@ -32,8 +33,10 @@ export async function finalizeReject(
   userId: string,
   reason?: string,
   expectedStatus: 'pending' | 'awaiting_reason' = approval.status === 'awaiting_reason' ? 'awaiting_reason' : 'pending',
+  accepted?: () => void,
 ): Promise<boolean> {
   if (!(await transitionPendingApprovalStatus(approval.approval_id, expectedStatus, 'rejected'))) return false;
+  accepted?.();
 
   const text = reason
     ? `Your ${approval.action} request was rejected by admin: "${reason}"`

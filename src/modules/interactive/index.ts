@@ -30,6 +30,10 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
     return 'closed'; // ours, but the session that asked is gone
   }
 
+  // Deleting the row claims the answer: of two answers, only one reaches the agent.
+  if (!(await deletePendingQuestion(payload.questionId))) return 'ignored';
+  payload.accepted?.();
+
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: `qr-${payload.questionId}-${Date.now()}`,
     kind: 'system',
@@ -45,7 +49,6 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
     }),
   });
 
-  await deletePendingQuestion(payload.questionId);
   log.info('Question response routed', {
     questionId: payload.questionId,
     selectedOption: payload.value,
