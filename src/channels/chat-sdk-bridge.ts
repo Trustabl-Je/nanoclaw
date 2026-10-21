@@ -550,6 +550,19 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
 
+/** The longest start of `raw`, ending in "…", that `ok` accepts; never splits a surrogate pair. */
+function longestStart(raw: string, ok: (shortened: string) => boolean): string {
+  const shortened = (n: number) => `${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`;
+  let lo = 0;
+  let hi = raw.length - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ok(shortened(mid))) lo = mid;
+    else hi = mid - 1;
+  }
+  return shortened(lo);
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -768,24 +781,34 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   // The resolved card replaces the buttons: the full request when it fits,
   // else the request ref (its overflow parts carry it) and the resolution.
   /** The longest start of a resolution, escaped and ending in "…", that `ok` accepts. */
-  const shortenResolution = (raw: string, ok: (resolution: string) => boolean) => {
-    const shortened = (n: number) =>
-      cardText(`${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`);
-    let lo = 0;
-    let hi = raw.length - 1;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (ok(shortened(mid))) lo = mid;
-      else hi = mid - 1;
-    }
-    return shortened(lo);
-  };
+  /** Every clicked card resolves the same way, on every channel: escaped and within its limits. */
+  const editClickedCard = (
+    threadId: string,
+    messageId: string,
+    questionId: string | undefined,
+    clicked: { title: string; question: string; selectedLabel: string; actorName: string },
+  ) =>
+    adapter.editMessage(
+      threadId,
+      messageId,
+      terminalMessage(
+        { title: clicked.title, question: clicked.question, resolution: clicked.selectedLabel },
+        questionId,
+        clicked.actorName ? ` by ${clicked.actorName}` : '',
+      ),
+    );
 
-  const terminalMessage = (spec: TerminalApprovalCard, questionId?: string) => {
-    // One text block; a longer resolution keeps its start (the decision and who made it).
+  /**
+   * `tail` (who decided) is kept whole whenever the resolution must be
+   * shortened; only the start before it is cut.
+   */
+  const terminalMessage = (spec: TerminalApprovalCard, questionId?: string, tail = '') => {
+    const shortened = (ok: (resolution: string) => boolean) =>
+      cardText(`${longestStart(spec.resolution, (start) => ok(cardText(`${start}${tail}`)))}${tail}`);
+    // One text block; a longer resolution keeps its start (the decision) and its tail.
     const withinBlock = (r: string) => r.length <= CARD_TEXT_BLOCK_LENGTH;
-    const escaped = cardText(spec.resolution);
-    const resolution = withinBlock(escaped) ? escaped : shortenResolution(spec.resolution, withinBlock);
+    const escaped = cardText(`${spec.resolution}${tail}`);
+    const resolution = withinBlock(escaped) ? escaped : shortened(withinBlock);
     const full: TerminalApprovalCard = {
       ...spec,
       question: cardText(spec.question),
@@ -793,16 +816,31 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       resolution,
     };
     if (fits(buildTerminalApprovalCard(full))) return terminalApprovalMessage(full);
-    const texts: string[][] = questionId === undefined ? [[]] : [[cardText(`Request ref ${questionId}`)], []];
-    for (const blocks of texts) {
-      for (const title of [spec.title, OVERFLOW_TITLE, '']) {
-        const short = { title, question: blocks.join('\n'), questionBlocks: blocks, resolution };
-        if (fits(buildTerminalApprovalCard(short))) return terminalApprovalMessage(short);
-      }
+    const titles = [spec.title, OVERFLOW_TITLE, ''];
+    const card = (title: string, blocks: string[]): TerminalApprovalCard => ({
+      title,
+      question: blocks.join('\n'),
+      questionBlocks: blocks,
+      resolution,
+    });
+    const firstFit = (cards: TerminalApprovalCard[]) => cards.find((c) => fits(buildTerminalApprovalCard(c)));
+    // A request posted in parts above: point to them.
+    if (questionId !== undefined && overflowProgress.get(questionId)?.deliveredId !== undefined) {
+      const ref = firstFit(titles.map((title) => card(title, [cardText(`Request ref ${questionId}`)])));
+      if (ref) return terminalApprovalMessage(ref);
     }
-    // Nothing else fits: keep the start of the resolution.
-    const last = shortenResolution(
-      spec.resolution,
+    // Otherwise the full request under a shorter title, then its start marked as cut (the card is resolved).
+    const fullFit = firstFit(titles.map((title) => card(title, full.questionBlocks ?? [])));
+    if (fullFit) return terminalApprovalMessage(fullFit);
+    const blocksOf = (text: string) => splitIfPossible(text, cardText, CARD_TEXT_BLOCK_LENGTH) ?? [];
+    for (const title of spec.question ? titles : []) {
+      const fitsWith = (shortened: string) => fits(buildTerminalApprovalCard(card(title, blocksOf(shortened))));
+      if (fitsWith('…')) return terminalApprovalMessage(card(title, blocksOf(longestStart(spec.question, fitsWith))));
+    }
+    const alone = firstFit(titles.map((title) => card(title, [])));
+    if (alone) return terminalApprovalMessage(alone);
+    // Nothing else fits: keep the start of the resolution, and its tail.
+    const last = shortened(
       (r) =>
         withinBlock(r) &&
         fits(buildTerminalApprovalCard({ title: '', question: '', questionBlocks: [], resolution: r })),
@@ -1046,15 +1084,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
         // Update the card to show the selected answer, who acted, and remove buttons
         const actorName = event.user?.userName || event.user?.fullName || '';
-        const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
-          const tid = event.threadId;
-          // Always a card: escaped resolution and the same fit checks, with or without a stored question.
-          await adapter.editMessage(
-            tid,
-            event.messageId,
-            terminalMessage({ title, question: render?.question ?? '', resolution }, questionId),
-          );
+          await editClickedCard(event.threadId, event.messageId, questionId, {
+            title,
+            question: render?.question ?? '',
+            selectedLabel,
+            actorName,
+          });
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
@@ -1080,7 +1116,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         gatewayAbort = new AbortController();
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken);
+        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken, editClickedCard);
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -1382,10 +1418,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
  * Loopback is not a trust boundary, so only our own Gateway listener may post
  * here: it sends the bot token in x-discord-gateway-token on every forward.
  */
+type EditClickedCard = (
+  threadId: string,
+  messageId: string,
+  questionId: string | undefined,
+  clicked: { title: string; question: string; selectedLabel: string; actorName: string },
+) => Promise<unknown>;
+
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
-  botToken?: string,
+  botToken: string | undefined,
+  editClickedCard: EditClickedCard,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -1398,7 +1442,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, editClickedCard)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -1431,7 +1475,8 @@ async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
-  botToken?: string,
+  botToken: string | undefined,
+  editClickedCard: EditClickedCard,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
@@ -1453,14 +1498,18 @@ async function handleForwardedEvent(
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
 
-      // Parse the selected option from custom_id
+      // Parse the selected option from custom_id. The adapter writes
+      // `${buttonId}\n${value}` (Chat SDK 4.41+); older cards carry the id alone.
+      const delimiter = customId?.indexOf('\n') ?? -1;
+      const actionId = delimiter === -1 ? customId : customId.slice(0, delimiter);
+      const encodedValue = delimiter === -1 ? undefined : customId.slice(delimiter + 1);
       let questionId: string | undefined;
       let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
+      if (actionId?.startsWith('ncq:')) {
+        const colonIdx = actionId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          questionId = actionId.slice(4, colonIdx);
+          tail = actionId.slice(colonIdx + 1);
         }
       }
 
@@ -1471,7 +1520,7 @@ async function handleForwardedEvent(
       const render = questionId ? await resolveQuestionRender(questionId) : undefined;
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, tail, tail);
+      const selectedOption = resolveSelectedOption(render, encodedValue ?? tail, tail);
       if (render?.deferResolution && questionId) {
         await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
           method: 'POST',
@@ -1488,35 +1537,49 @@ async function handleForwardedEvent(
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
       const actorName = user?.global_name || user?.username || '';
-      const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
+      const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
       try {
+        // Ack within Discord's 3 s and remove the buttons in the same call
+        // (UPDATE_MESSAGE with components only: the embed stays, so no length
+        // limit can reject it), before the decision is dispatched.
         await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 7, // UPDATE_MESSAGE — acknowledge + update in one call
-            data: {
-              embeds: [
-                {
-                  title: cardTitle,
-                  description: originalDescription || render?.question || '',
-                  footer: { text: resolution },
-                },
-              ],
-              components: [], // remove buttons
-            },
-          }),
+          body: JSON.stringify({ type: 7, data: { components: [] } }),
         });
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed ack must not drop the recorded decision
       } catch (err) {
-        log.error('Failed to update interaction', { err });
+        log.error('Failed to acknowledge interaction', { err });
       }
 
-      // Dispatch to host
-      if (questionId && selectedOption) {
+      // Record the decision before any card update, which can fail or stall.
+      // An empty value counts when it is a real option's value.
+      if (questionId && (selectedOption || render?.options.some((option) => option.value === selectedOption))) {
         setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+          messageId,
           platformId: interaction.channel_id as string | undefined,
         });
+      }
+
+      // Then the card text, in the background so a stalled update can't hold
+      // this event: edited like every resolved card, escaped and within the limits.
+      if (messageId) {
+        void (async () => {
+          try {
+            const threadId = adapter.encodeThreadId({
+              guildId: (interaction.guild_id as string | undefined) || '@me',
+              channelId: interaction.channel_id as string,
+            });
+            await editClickedCard(threadId, messageId, questionId, {
+              title: cardTitle,
+              question: render?.question ?? originalDescription,
+              selectedLabel,
+              actorName,
+            });
+          } catch (err) {
+            log.error('Failed to update interaction', { err });
+          }
+        })();
       }
       return;
     }
