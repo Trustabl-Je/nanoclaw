@@ -78,6 +78,13 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
  * name reply and a button click can't interleave and leave an agent unconnected.
  */
 const registrationTurns = new Map<string, Promise<unknown>>();
+
+/** A decided registration takes no name reply: its replayed message, or a late reply, routes normally. */
+function disarmNamePrompts(messagingGroupId: string): void {
+  for (const [user, prompt] of awaitingNameInput) {
+    if (prompt.channelMgId === messagingGroupId) awaitingNameInput.delete(user);
+  }
+}
 function onRegistration<T>(messagingGroupId: string, run: () => Promise<T>): Promise<T> {
   const next = (registrationTurns.get(messagingGroupId) ?? Promise.resolve()).then(run);
   const settled = next.catch(() => undefined);
@@ -454,6 +461,7 @@ async function wireApprovedChannel(
     return true;
   });
   if (!claimed) return 'ignored';
+  disarmNamePrompts(row.messaging_group_id);
   // Recorded: the card can show it while the message is replayed.
   accepted?.();
   log.info('Channel registration approved — wiring created', {
@@ -539,6 +547,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         return true;
       }),
     );
+    if (claimed) disarmNamePrompts(row.messaging_group_id);
     if (!claimed) return 'ignored';
     log.info('Channel registration denied', {
       messagingGroupId: row.messaging_group_id,
@@ -669,6 +678,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       const removed = await onRegistration(row.messaging_group_id, () =>
         deletePendingChannelApproval(row.messaging_group_id),
       );
+      if (removed) disarmNamePrompts(row.messaging_group_id);
       return removed ? 'closed' : 'ignored';
     }
     if (!(await hasAdminPrivilege(approverId, targetAgentGroupId))) {
@@ -801,7 +811,7 @@ async function createFromNameReply(
             wired === 'accepted'
               ? `✅ Agent "${ag.name}" created and connected.`
               : wired === 'ignored'
-                ? `⚠️ Agent "${ag.name}" was created, but this channel had already been connected another way.`
+                ? `⚠️ Agent "${ag.name}" was created, but this channel's request was answered or removed meanwhile, so it isn't connected.`
                 : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
         }),
         undefined,

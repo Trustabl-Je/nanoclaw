@@ -1079,8 +1079,13 @@ describe('unknown-channel registration flow', () => {
       }
       return false;
     })();
+    const { wakeContainer } = await import('../../container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
     const finished = await Promise.race([handled, new Promise((resolve) => setTimeout(() => resolve('hung'), 2000))]);
     expect(finished).toBe('accepted');
+    // The replayed message reached the agent instead of being taken as a name.
+    expect(wakeContainer).toHaveBeenCalled();
+    expect(await getDb().get("SELECT id FROM agent_groups WHERE name = 'hello'")).toBeUndefined();
   });
 
   it('a connect to an agent deleted meanwhile takes its turn too: no agent is left unconnected', async () => {
