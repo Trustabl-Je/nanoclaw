@@ -36,8 +36,11 @@ export interface ResponsePayload {
  */
 export type ResponseOutcome = 'accepted' | 'refused' | 'closed' | 'ignored';
 
-/** Returns the click's outcome when the handler owns it, else false to pass it on. */
-export type ResponseHandler = (payload: ResponsePayload) => Promise<ResponseOutcome | false>;
+/**
+ * Returns the click's outcome when the handler owns it, else false to pass it
+ * on. true still counts as 'accepted' (handlers written before outcomes).
+ */
+export type ResponseHandler = (payload: ResponsePayload) => Promise<ResponseOutcome | boolean>;
 
 const responseHandlers: ResponseHandler[] = [];
 
@@ -62,7 +65,7 @@ export function dispatchResponse(payload: ResponsePayload): Promise<ResponseOutc
       for (const handler of responseHandlers) {
         try {
           const outcome = await handler(owned);
-          if (outcome) return resolve(outcome);
+          if (outcome) return resolve(outcome === true ? 'accepted' : outcome);
         } catch (err) {
           log.error('Response handler threw', { questionId: payload.questionId, err });
         }

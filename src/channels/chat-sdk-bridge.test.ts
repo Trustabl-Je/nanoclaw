@@ -1558,6 +1558,8 @@ it('forwards the authenticated instance and message address without editing a de
       instance: 'fixture-one',
       messageId: 'original-card',
       platformId: 'fixture:room',
+      // The card's thread, so a handler can check the card it was sent as.
+      threadId: 'fixture:room',
     });
     expect(editMessage).not.toHaveBeenCalled();
   } finally {
@@ -1939,7 +1941,15 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     onAction.mockResolvedValue('refused');
     try {
       await click('bystander', 'Bob');
-      expect(afterClick).toHaveBeenCalledWith({ outcome: 'refused', selectedOption: 'approve', userId: 'bystander' });
+      expect(afterClick).toHaveBeenCalledWith({
+        outcome: 'refused',
+        selectedOption: 'approve',
+        userId: 'bystander',
+        actorName: 'Bob',
+        messageId: 'card-1',
+        platformId: 'fixture:room',
+        threadId: 'fixture:room',
+      });
       expect(editMessage).toHaveBeenCalledWith('fixture:room', 'card-1', { markdown: 'Decided elsewhere' });
       expect(postEphemeral).toHaveBeenCalledWith('fixture:room', 'bystander', 'Only Cy can approve this.', {
         fallbackToDM: false,
@@ -2003,6 +2013,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
         instance: 'fixture',
         messageId: 'card-3',
         platformId: 'fixture:room',
+        threadId: 'fixture:room',
       });
     } finally {
       await bridge.teardown();
@@ -2554,9 +2565,11 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       const auth = { 'x-discord-gateway-token': BOT_TOKEN };
       expect((await post(click, auth)).status).toBe(200);
       await vi.waitFor(() =>
+        // The encoded channel, as the card's messaging group records it (not the raw Discord id).
         expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
           messageId: 'card-1',
-          platformId: 'chan-1',
+          platformId: 'discord:@me:chan-1',
+          threadId: 'discord:@me:chan-1',
         }),
       );
       expect((await post(message, auth)).status).toBe(200);
@@ -2598,7 +2611,8 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await vi.waitFor(() =>
         expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
           messageId: 'card-2',
-          platformId: 'chan-1',
+          platformId: 'discord:@me:chan-1',
+          threadId: 'discord:@me:chan-1',
         }),
       );
     } finally {

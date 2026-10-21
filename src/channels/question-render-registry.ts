@@ -33,8 +33,13 @@ export interface QuestionRender {
     /** Undefined when the click named no option. */
     outcome: ResponseOutcome | undefined;
     selectedOption: string;
-    /** The clicker's platform user id. */
+    /** The clicker's platform user id, and display name ('' when unknown). */
     userId: string;
+    actorName: string;
+    /** Where the click came from: the card's message, channel and thread, as the host saw them. */
+    messageId: string | undefined;
+    platformId: string | undefined;
+    threadId: string | null | undefined;
   }) => Promise<{ card?: Parameters<Adapter['postMessage']>[1]; privateNote?: string } | undefined>;
 }
 
