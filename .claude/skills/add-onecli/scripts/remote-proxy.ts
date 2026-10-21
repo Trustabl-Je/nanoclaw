@@ -4,6 +4,7 @@
  * host that is a port nothing serves, so every model call retries with no reply
  * and no error until the gateway host overrides it.
  */
+import { execFileSync } from 'child_process';
 import dns from 'dns';
 import net from 'net';
 import os from 'os';
@@ -26,9 +27,39 @@ function isAgentLocal(host: string): boolean {
   return isLoopback(h) || h === 'host.docker.internal' || h === '0.0.0.0' || h === '::';
 }
 
-function isThisMachine(host: string, interfaces: Interfaces): boolean {
+/** Every address in `ip -o addr show` output: the local side of each `inet`/`inet6` field. */
+export function ipAddrAddresses(output: string): string[] {
+  const words = output.split(/\s+/);
+  return words
+    .flatMap((w, i) => (w === 'inet' || w === 'inet6' ? [(words[i + 1] ?? '').split('/')[0].toLowerCase()] : []))
+    .filter((a) => net.isIP(a));
+}
+
+const readIpAddr = () =>
+  execFileSync('ip', ['-o', 'addr', 'show'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+
+/**
+ * This machine's addresses. Node lists only interfaces that are up with a
+ * carrier, so it drops docker0 while no container uses the bridge; on Linux,
+ * `ip` lists addresses on down interfaces too.
+ */
+export function ownAddresses(
+  deps: { interfaces?: Interfaces; platform?: NodeJS.Platform; ipAddr?: () => string } = {},
+): string[] {
+  const own = Object.values(deps.interfaces ?? os.networkInterfaces()).flatMap((addrs) =>
+    (addrs ?? []).map((a) => a.address.toLowerCase()),
+  );
+  if ((deps.platform ?? process.platform) !== 'linux') return own;
+  try {
+    return [...own, ...ipAddrAddresses((deps.ipAddr ?? readIpAddr)())];
+  } catch {
+    return own;
+  }
+}
+
+function isThisMachine(host: string, own: readonly string[]): boolean {
   const h = bare(host);
-  return isLoopback(h) || Object.values(interfaces).some((addrs) => (addrs ?? []).some((a) => a.address === h));
+  return isLoopback(h) || own.includes(h);
 }
 
 /** The proxy URL from a /v1/container-config answer, or null. Carries the agent token. */
@@ -87,12 +118,12 @@ export function remoteProxyHint(
   gatewayUrl: string,
   config: unknown,
   gatewayAddresses: string[] = [],
-  interfaces: Interfaces = os.networkInterfaces(),
+  own: readonly string[] = ownAddresses(),
 ): string | null {
   const proxy = advertisedProxy(config);
   if (!proxy || !isAgentLocal(proxy.hostname)) return null;
   const gatewayHost = new URL(gatewayUrl).hostname;
-  if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, interfaces))) return null;
+  if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, own))) return null;
   const port = proxy.port || '80';
   return (
     `The remote OneCLI gateway tells agents to use the proxy ${proxy.hostname}:${port}, their own machine, ` +
@@ -128,9 +159,9 @@ export function runtimeGateway(
 export async function checkRemoteProxy(
   gatewayUrl: string,
   apiKey: string | undefined,
-  deps: { fetchImpl?: typeof fetch; lookup?: Lookup; interfaces?: Interfaces } = {},
+  deps: { fetchImpl?: typeof fetch; lookup?: Lookup; ownAddresses?: readonly string[] } = {},
 ): Promise<ProxyCheck> {
-  const interfaces = deps.interfaces ?? os.networkInterfaces();
+  const own = deps.ownAddresses ?? ownAddresses();
   const host = new URL(gatewayUrl).hostname;
   let addresses: string[] = [];
   try {
@@ -138,9 +169,9 @@ export async function checkRemoteProxy(
   } catch {
     // Unresolved here: judge the name as given.
   }
-  if ([host, ...addresses].some((h) => isThisMachine(h, interfaces))) return REACHABLE;
+  if ([host, ...addresses].some((h) => isThisMachine(h, own))) return REACHABLE;
   const read = await readContainerConfig(gatewayUrl, apiKey, deps.fetchImpl);
   if (!read.ok) return skippedCheck(read.reason);
-  const hint = remoteProxyHint(gatewayUrl, read.config, addresses, interfaces);
+  const hint = remoteProxyHint(gatewayUrl, read.config, addresses, own);
   return hint ? { status: 'warn', hint } : REACHABLE;
 }

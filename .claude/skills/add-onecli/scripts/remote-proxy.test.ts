@@ -8,6 +8,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   advertisedProxy,
   checkRemoteProxy,
+  ipAddrAddresses,
+  ownAddresses,
   readContainerConfig,
   remoteProxyHint,
   runtimeGateway,
@@ -21,11 +23,21 @@ const config = (base: string) => ({
   env: { HTTPS_PROXY: `http://x:${TOKEN}@${base}`, HTTP_PROXY: `http://x:${TOKEN}@${base}` },
   caCertificate: '-----BEGIN CERTIFICATE-----',
 });
-const interfaces = {
-  lo: [{ address: '127.0.0.1' }],
-  docker0: [{ address: '172.17.0.1' }],
+const own = ['127.0.0.1', '172.17.0.1', '192.168.107.215'];
+
+// docker0 with no container attached: Node's list leaves it out, `ip` does not.
+const nodeInterfaces = {
+  lo: [{ address: '127.0.0.1' }, { address: '::1' }],
   eth0: [{ address: '192.168.107.215' }],
 } as unknown as ReturnType<typeof os.networkInterfaces>;
+const IP_ADDR = [
+  '1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever',
+  '1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever',
+  '2: eth0    inet 192.168.107.215/24 brd 192.168.107.255 scope global eth0\\       valid_lft forever preferred_lft forever',
+  '3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever',
+  '3: docker0    inet6 fe80::42:acff:fe11:1/64 scope link \\       valid_lft forever preferred_lft forever',
+].join('\n');
+const linuxDownBridge = () => ownAddresses({ interfaces: nodeInterfaces, platform: 'linux', ipAddr: () => IP_ADDR });
 
 describe('advertisedProxy', () => {
   it('reads the proxy the gateway hands agents', () => {
@@ -43,7 +55,7 @@ describe('advertisedProxy', () => {
 describe('remoteProxyHint', () => {
   it('warns when a remote gateway points agents at their own machine, with the exact fix', () => {
     for (const base of ['host.docker.internal:10255', 'localhost:10255', '127.0.0.1:10255']) {
-      const hint = remoteProxyHint(GATEWAY, config(base), [], interfaces);
+      const hint = remoteProxyHint(GATEWAY, config(base), [], own);
       expect(hint).toContain(base);
       expect(hint).toContain('GATEWAY_BASE_URL=192.168.107.212:10255');
       expect(hint).toContain('docker compose up -d');
@@ -55,33 +67,77 @@ describe('remoteProxyHint', () => {
   });
 
   it('never prints the agent token or proxy credentials', () => {
-    const hint = remoteProxyHint(GATEWAY, config('host.docker.internal:10255'), [], interfaces) ?? '';
+    const hint = remoteProxyHint(GATEWAY, config('host.docker.internal:10255'), [], own) ?? '';
     expect(hint).not.toContain(TOKEN);
     expect(hint).not.toContain('x:');
     expect(hint).not.toContain('@');
   });
 
   it('stays quiet once the gateway hands out an address agents can reach', () => {
-    expect(remoteProxyHint(GATEWAY, config('192.168.107.212:10255'), [], interfaces)).toBeNull();
-    expect(remoteProxyHint(GATEWAY, config('onecli.example.net:10255'), [], interfaces)).toBeNull();
+    expect(remoteProxyHint(GATEWAY, config('192.168.107.212:10255'), [], own)).toBeNull();
+    expect(remoteProxyHint(GATEWAY, config('onecli.example.net:10255'), [], own)).toBeNull();
   });
 
   it('stays quiet when the "remote" gateway is on this machine', () => {
     for (const url of ['http://127.0.0.1:10254', 'http://172.17.0.1:10254', 'http://192.168.107.215:10254']) {
-      expect(remoteProxyHint(url, config('host.docker.internal:10255'), [], interfaces)).toBeNull();
+      expect(remoteProxyHint(url, config('host.docker.internal:10255'), [], own)).toBeNull();
     }
   });
 
   it('judges a gateway name by the addresses it resolves to', () => {
     const named = 'http://nanoclaw.local:10254';
-    expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.215'], interfaces)).toBeNull();
-    expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.212'], interfaces)).toContain(
+    expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.215'], own)).toBeNull();
+    expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.212'], own)).toContain(
       'GATEWAY_BASE_URL=nanoclaw.local:10255',
     );
   });
 
   it('stays quiet when the config has no proxy', () => {
-    expect(remoteProxyHint(GATEWAY, { env: {} }, [], interfaces)).toBeNull();
+    expect(remoteProxyHint(GATEWAY, { env: {} }, [], own)).toBeNull();
+  });
+});
+
+describe('ipAddrAddresses', () => {
+  it('reads every address `ip -o addr show` lists, down interfaces included', () => {
+    expect(ipAddrAddresses(IP_ADDR)).toEqual([
+      '127.0.0.1',
+      '::1',
+      '192.168.107.215',
+      '172.17.0.1',
+      'fe80::42:acff:fe11:1',
+    ]);
+  });
+
+  it('takes the local side of a point-to-point address and skips anything else', () => {
+    expect(ipAddrAddresses('4: wg0    inet 10.8.0.2 peer 10.8.0.1/32 scope global wg0\\')).toEqual(['10.8.0.2']);
+    expect(ipAddrAddresses('5: inet    inet 10.9.0.1/24 scope global inet\\')).toEqual(['10.9.0.1']);
+    expect(ipAddrAddresses('')).toEqual([]);
+    expect(ipAddrAddresses('Object "addr" is unknown, try "ip help".')).toEqual([]);
+  });
+});
+
+describe('ownAddresses', () => {
+  it('counts a down docker bridge on Linux, which Node leaves out', () => {
+    expect(linuxDownBridge()).toContain('172.17.0.1');
+    expect(linuxDownBridge()).toContain('192.168.107.215');
+    expect(linuxDownBridge()).not.toContain('192.168.107.212');
+  });
+
+  it("falls back to Node's list when ip is missing or fails", () => {
+    const ipAddr = () => {
+      throw new Error('spawnSync ip ENOENT');
+    };
+    expect(ownAddresses({ interfaces: nodeInterfaces, platform: 'linux', ipAddr })).toEqual([
+      '127.0.0.1',
+      '::1',
+      '192.168.107.215',
+    ]);
+  });
+
+  it('asks only Node off Linux, where there is no ip', () => {
+    const ipAddr = vi.fn(() => IP_ADDR);
+    expect(ownAddresses({ interfaces: nodeInterfaces, platform: 'darwin', ipAddr })).not.toContain('172.17.0.1');
+    expect(ipAddr).not.toHaveBeenCalled();
   });
 });
 
@@ -152,40 +208,59 @@ describe('checkRemoteProxy', () => {
   const none = async () => [];
 
   it('warns for a remote gateway that hands out the default proxy', async () => {
-    const res = await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: ok(), lookup: none, interfaces });
+    const res = await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: ok(), lookup: none, ownAddresses: own });
     expect(res.status).toBe('warn');
     expect(res.hint).toContain('GATEWAY_BASE_URL=192.168.107.212:10255');
   });
 
   it('passes a remote gateway that hands out its own address', async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify(config('192.168.107.212:10255'))));
-    expect((await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl, lookup: none, interfaces })).status).toBe('ok');
+    expect((await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl, lookup: none, ownAddresses: own })).status).toBe('ok');
   });
 
   it('passes a gateway on this machine without asking it anything', async () => {
     const fetchImpl = ok();
     for (const url of ['http://127.0.0.1:10254', 'http://172.17.0.1:10254']) {
-      expect((await checkRemoteProxy(url, TOKEN, { fetchImpl, lookup: none, interfaces })).status).toBe('ok');
+      expect((await checkRemoteProxy(url, TOKEN, { fetchImpl, lookup: none, ownAddresses: own })).status).toBe('ok');
     }
     const local = async () => ['192.168.107.215'];
     const named = await checkRemoteProxy('http://nanoclaw.local:10254', TOKEN, {
       fetchImpl,
       lookup: local,
-      interfaces,
+      ownAddresses: own,
     });
     expect(named.status).toBe('ok');
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('passes a gateway bound to a docker bridge that is down, and still warns for a remote one', async () => {
+    const fetchImpl = ok();
+    const local = await checkRemoteProxy('http://172.17.0.1:10254', TOKEN, {
+      fetchImpl,
+      lookup: none,
+      ownAddresses: linuxDownBridge(),
+    });
+    expect(local.status).toBe('ok');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const remote = await checkRemoteProxy(GATEWAY, TOKEN, {
+      fetchImpl: ok(),
+      lookup: none,
+      ownAddresses: linuxDownBridge(),
+    });
+    expect(remote.status).toBe('warn');
+  });
+
   it('skips when the config cannot be read, and survives a failed lookup', async () => {
     const refused = vi.fn(async () => new Response('', { status: 401 }));
-    const skipped = await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: refused, lookup: none, interfaces });
+    const skipped = await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: refused, lookup: none, ownAddresses: own });
     expect(skipped.status).toBe('skipped');
     expect(skipped.hint).toContain('status 401');
     const lookup = async () => {
       throw new Error('ENOTFOUND');
     };
-    expect((await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: ok(), lookup, interfaces })).status).toBe('warn');
+    expect((await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: ok(), lookup, ownAddresses: own })).status).toBe(
+      'warn',
+    );
   });
 });
 
