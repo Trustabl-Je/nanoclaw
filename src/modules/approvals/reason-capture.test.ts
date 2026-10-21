@@ -258,6 +258,31 @@ describe('reject with reason', () => {
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "typed fast"');
   });
 
+  it('finalizes a reject whose prompt failed after a second Reject with reason took over the DM', async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-first', 'install_packages');
+    await seedApproval('appr-second', 'install_packages');
+    let failFirst!: () => void;
+    deliverHold = new Promise<void>((_, reject) => (failFirst = () => reject(new Error('channel down'))));
+    const click = (approvalId: string) =>
+      handleApprovalsResponse({
+        questionId: approvalId,
+        value: REJECT_WITH_REASON_VALUE,
+        userId: 'admin-1',
+        channelType: DM_CHANNEL,
+        platformId: DM_PLATFORM,
+        threadId: null,
+      });
+    const first = click('appr-first');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await click('appr-second');
+    failFirst();
+    await first;
+    // The first can't be answered any more: rejected now, not left to the sweep.
+    expect(await getPendingApproval('appr-first')).toBeUndefined();
+    expect((await getPendingApproval('appr-second'))?.status).toBe('awaiting_reason');
+  });
+
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
     const { captureReasonReply } = await import('./reason-capture.js');
     await seedApproval('appr-3');

@@ -74,7 +74,7 @@ async function handleRegisteredApproval(
   // Plain Reject (or any other non-approve value) — instant fast path. Only from
   // 'pending': a card click must not cut short a reason the admin is typing.
   if (selectedOption !== 'approve') {
-    return (await finalizeReject(approval, session, userId, undefined, 'pending', accepted)) ? 'accepted' : 'ignored';
+    return (await finalizeReject(approval, session, userId, { from: 'pending', accepted })) ? 'accepted' : 'ignored';
   }
 
   if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'approved'))) return 'ignored';

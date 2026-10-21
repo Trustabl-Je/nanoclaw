@@ -73,6 +73,8 @@ export function dispatchResponse(payload: ResponsePayload): Promise<ResponseOutc
       for (const handler of responseHandlers) {
         try {
           const outcome = await handler(owned);
+          // So a skill author can see why the card didn't change.
+          if (outcome === true) log.warn('Response handler returned true: nothing shown', { code: 'legacy_true' });
           if (outcome) return resolve(outcome === true ? 'ignored' : outcome);
         } catch (err) {
           log.error('Response handler threw', { questionId: payload.questionId, err });

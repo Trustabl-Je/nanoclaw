@@ -57,6 +57,8 @@ interface ReasonArming {
  * staleness, or restart.
  */
 const awaitingReason = new Map<string, ReasonArming>();
+/** Approvals whose reason reply is being relayed right now: a failed prompt must not overtake it. */
+const capturing = new Set<string>();
 
 function dmKey(channelType: string, platformId: string, instance: string = channelType): string {
   return `${instance}:${platformId}`;
@@ -100,7 +102,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       hasDeliveryAddress: Boolean(channelType && platformId),
       hasAdapter: Boolean(adapter),
     });
-    await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
+    await finalizeReject(approval, session, userId, { from: 'awaiting_reason' });
     return true;
   }
 
@@ -122,14 +124,16 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       instance,
     );
   } catch (err) {
-    // A reason caught meanwhile (the capture took the arming) wins over the plain reject.
-    if (awaitingReason.get(key) !== arming) return true;
-    awaitingReason.delete(key);
+    if (awaitingReason.get(key) === arming) awaitingReason.delete(key);
+    // A reason caught meanwhile wins. Otherwise reject plainly now, also when a later
+    // "Reject with reason…" in this DM took the arming: this one can't be answered.
+    if (capturing.has(approval.approval_id)) return true;
+    if ((await getPendingApproval(approval.approval_id))?.status !== 'awaiting_reason') return true;
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
       err,
     });
-    await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
+    await finalizeReject(approval, session, userId, { from: 'awaiting_reason' });
     return true;
   }
 
@@ -151,7 +155,15 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
 
   // This DM is an armed reason channel — disarm regardless of outcome.
   awaitingReason.delete(key);
+  capturing.add(arming.approvalId);
+  try {
+    return await relayReason(arming, event);
+  } finally {
+    capturing.delete(arming.approvalId);
+  }
+}
 
+async function relayReason(arming: ReasonArming, event: InboundEvent): Promise<boolean> {
   const approval = await getPendingApproval(arming.approvalId);
   if (!approval || approval.status !== 'awaiting_reason') {
     // Already finalized (e.g. ghosted by the sweep). The reply is no longer a
@@ -166,7 +178,7 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
   }
 
   const reason = clampReason(extractText(event));
-  await finalizeReject(approval, session, arming.userId, reason || undefined);
+  await finalizeReject(approval, session, arming.userId, { reason: reason || undefined });
   log.info('reject-with-reason: reason captured and relayed', {
     approvalId: approval.approval_id,
     hasReason: reason.length > 0,

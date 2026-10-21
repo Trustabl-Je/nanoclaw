@@ -998,6 +998,47 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(0);
   });
 
+  it('a name reply and a connect click take turns: no agent is created without being connected', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-name-vs-connect')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    expect(await dispatchResponse({ ...payload, value: 'new_agent' })).toBe('accepted');
+    deliverMock.mockClear();
+
+    await Promise.all([
+      routeInbound({
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        message: {
+          id: 'name-race-1',
+          kind: 'chat' as const,
+          content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Racer' }),
+          timestamp: now(),
+        },
+      }),
+      dispatchResponse({ ...payload, value: 'connect:ag-1' }),
+    ]);
+
+    const racer = await getDb().get<{ id: string }>("SELECT id FROM agent_groups WHERE name = 'Racer'");
+    if (racer) {
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
+          questionId,
+          racer.id,
+        ),
+      ).toBe(1);
+    }
+    const notes = deliverMock.mock.calls.map((call) => String(call[4]));
+    expect(notes.some((note) => note.includes('check the host logs'))).toBe(false);
+  });
+
   it('a name reply after the registration vanished is consumed without creating anything', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
