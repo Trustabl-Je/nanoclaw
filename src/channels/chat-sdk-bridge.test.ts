@@ -1095,11 +1095,13 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
       registerQuestionRenderResolver((id) => (id === 'q-len' ? { title: CARD_TITLE, options: [] } : undefined));
       const { editMessage, editedTexts } = editCapture();
+      const { postMessage } = numberedPosts();
       const bridge = createChatSdkBridge({
-        adapter: stubAdapter({ editMessage }),
+        adapter: stubAdapter({ editMessage, postMessage }),
         supportsThreads: false,
         cardFits: fitsWithin(300),
       });
+      await bridge.deliver('slack:D1', null, questionCard('y'.repeat(1000)));
       await bridge.deliver('slack:D1', null, {
         kind: 'chat-sdk',
         content: {
@@ -1112,7 +1114,7 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(editedTexts()).toEqual(['Request ref q-len', 'Approved']);
     });
 
-    it('keeps only the resolution when text and resolution do not fit together', async () => {
+    it('keeps the start of a request that no longer fits with its resolution, marked as cut', async () => {
       const { editMessage, editedTexts } = editCapture();
       const bridge = createChatSdkBridge({
         adapter: stubAdapter({ editMessage }),
@@ -1124,13 +1126,17 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
         content: {
           operation: 'edit',
           messageId: 'msg-1',
-          terminalCard: { title: CARD_TITLE, question: 'x'.repeat(50), resolution: 'Approved' },
+          terminalCard: { title: CARD_TITLE, question: 'x'.repeat(65), resolution: 'Approved' },
         },
       });
-      expect(editedTexts()).toEqual(['Approved']);
+      // Posted whole, so there are no parts to point to; the resolved card has no buttons.
+      const [text, resolution] = editedTexts() as string[];
+      expect(text).toMatch(/^x+…$/);
+      expect(resolution).toBe('Approved');
+      expect(CARD_TITLE.length + text.length + 1 + resolution.length).toBeLessThanOrEqual(70);
     });
 
-    it('shortens the title too when even the resolution alone does not fit with it', async () => {
+    it('shortens the title too when the original one leaves no room', async () => {
       const { edits, editMessage, editedTexts } = editCapture();
       const bridge = createChatSdkBridge({
         adapter: stubAdapter({ editMessage }),
@@ -1143,11 +1149,13 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
         content: {
           operation: 'edit',
           messageId: 'msg-1',
-          terminalCard: { title: 'T'.repeat(220), question: 'x'.repeat(50), resolution },
+          terminalCard: { title: 'T'.repeat(220), question: 'x'.repeat(250), resolution },
         },
       });
       expect((edits[0].message as { card: { title: string } }).card.title).toBe('Approval request');
-      expect(editedTexts()).toEqual([resolution]);
+      const [text, kept] = editedTexts() as string[];
+      expect(text).toMatch(/^x+…$/);
+      expect(kept).toBe(resolution);
     });
 
     it('lets the channel measure the styled card it will render', async () => {
@@ -1172,7 +1180,7 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
           terminalCard: { title: CARD_TITLE, question, resolution: 'Approved' },
         },
       });
-      expect(editedTexts()).toEqual(['Approved']);
+      expect(editedTexts()).toEqual([question, 'Approved']);
     });
 
     it('keeps a resolution longer than one text block to its start', async () => {
@@ -1558,7 +1566,7 @@ it('forwards the authenticated instance and message address without editing a de
   }
 });
 
-it('keeps a clicked card short when its request was posted above it', async () => {
+it('keeps the start of a clicked request that no longer fits with its resolution', async () => {
   const { initTestDb, closeDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
   const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
@@ -1604,10 +1612,9 @@ it('keeps a clicked card short when its request was posted above it', async () =
       undefined,
     );
     const edited = editMessage.mock.calls[0][2] as { card: { children: Array<{ content?: string }> } };
-    expect(edited.card.children.map((child) => child.content)).toEqual([
-      'Request ref click-overflow',
-      'Approved by ann',
-    ]);
+    const [text, resolution] = edited.card.children.map((child) => child.content);
+    expect(text).toMatch(/^q+…$/);
+    expect(resolution).toBe('Approved by ann');
   } finally {
     await bridge.teardown();
     await closeDb();
@@ -1660,6 +1667,54 @@ it('edits a clicked card with no stored question into an escaped card, not raw m
     // The resolution is card text, so it's escaped; each channel escapes card titles itself.
     expect(edited.card?.title).toBe('<!channel> Pick one');
     expect(edited.card?.children.map((child) => child.content)).toEqual(['&lt;!here&gt; Yes by ann']);
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+it('keeps who decided when a channel cap forces a long label to be cut', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'click-long-label'
+      ? { title: 'Review', options: [{ label: 'Yes', selectedLabel: 'L'.repeat(400), value: 'yes' }] }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({
+    adapter,
+    instance: 'fixture-four',
+    supportsThreads: false,
+    maxCardTextLength: 300,
+  });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:click-long-label:0',
+        adapter,
+        messageId: 'button-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected', userName: 'Clicker' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    const edited = editMessage.mock.calls[0][2] as { card: { children: Array<{ content?: string }> } };
+    const resolution = edited.card.children.at(-1)?.content ?? '';
+    expect(resolution).toMatch(/^L+… by Clicker$/);
+    expect(resolution.length).toBeLessThanOrEqual(300);
   } finally {
     await bridge.teardown();
     await closeDb();
@@ -1722,6 +1777,179 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     vi.unstubAllGlobals();
     const { closeDb } = await import('../db/connection.js');
     await closeDb();
+  });
+
+  /** A Discord-shaped bridge: real thread-id encoding, editMessage capture, Discord's card limits. */
+  async function startDiscord(questionId: string, render: Record<string, unknown>) {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) => (id === questionId ? (render as never) : undefined));
+    let webhookUrl = '';
+    const editMessage = vi.fn(async () => ({ id: 'card-1', threadId: 't', raw: {} }));
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook: vi.fn(async () => new Response('ok')),
+      channelIdFromThreadId: (threadId: string) => threadId,
+      encodeThreadId: ({ guildId, channelId }: { guildId: string; channelId: string }) =>
+        `discord:${guildId}:${channelId}`,
+      editMessage,
+    } as never) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    const texts = (card: CardElement) =>
+      card.children.flatMap((child) => (child.type === 'text' ? [child.content] : []));
+    const onAction = vi.fn();
+    const bridge = createChatSdkBridge({
+      adapter,
+      supportsThreads: true,
+      botToken: BOT_TOKEN,
+      // Discord: embed title <= 256, description <= 4,096.
+      cardFits: (card) => (card.title ?? '').length <= 256 && texts(card).join('\n\n').length <= 4096,
+    });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    // Chat SDK 4.41+ encodes a button's custom_id as `${id}\n${value}`.
+    const click = (user: Record<string, string>, customId = `ncq:${questionId}:0\n0`) =>
+      realFetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
+        body: JSON.stringify({
+          type: 'GATEWAY_INTERACTION_CREATE',
+          data: {
+            type: 3,
+            id: 'interaction-2',
+            token: 'interaction-token',
+            application_id: 'app-1',
+            guild_id: 'G1',
+            channel_id: 'C1',
+            data: { custom_id: customId },
+            member: { user },
+            message: { id: 'card-1', embeds: [{ title: 'T'.repeat(256), description: 'Allow?' }] },
+          },
+        }),
+      });
+    return { bridge, click, onAction, editMessage };
+  }
+
+  const ACK = { type: 7, data: { components: [] } };
+  const ackBodies = () =>
+    vi.mocked(globalThis.fetch).mock.calls.map(([url, init]) => [String(url), JSON.parse(String(init?.body))]);
+  const review = {
+    title: 'Review',
+    question: 'Allow?',
+    options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+  };
+
+  it('acks a Discord click, then edits the card within Discord limits', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord', {
+      ...review,
+      title: 'T'.repeat(300),
+    });
+    try {
+      expect((await click({ id: 'clicker-1', username: 'clicker', global_name: 'Clicker' })).status).toBe(200);
+      // One call acks and removes the buttons; the embed is left for the edit below.
+      expect(ackBodies()).toEqual([
+        ['https://discord.com/api/v10/interactions/interaction-2/interaction-token/callback', ACK],
+      ]);
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalled());
+      const [threadId, messageId, edited] = editMessage.mock.calls[0] as unknown as [
+        string,
+        string,
+        { card: CardElement },
+      ];
+      expect([threadId, messageId]).toEqual(['discord:G1:C1', 'card-1']);
+      expect(edited.card.title).toBe('Approval request');
+      expect(edited.card.children.map((child) => (child as { content?: string }).content)).toEqual([
+        'Allow?',
+        'Approved by Clicker',
+      ]);
+      expect(onAction).toHaveBeenCalledWith('q-discord', 'approve', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('decodes the selected option from the custom_id the adapter wrote, and the older plain form', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-id', {
+      ...review,
+      options: [
+        { label: 'Approve', selectedLabel: 'Approved', value: 'approve' },
+        { label: 'Reject', selectedLabel: 'Rejected', value: 'reject' },
+      ],
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-id:1\n1');
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-id:0');
+      expect(onAction.mock.calls.map((call) => call[1])).toEqual(['reject', 'approve']);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('records an option whose value is empty', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-empty', {
+      ...review,
+      options: [{ label: 'No prefix', selectedLabel: 'No prefix', value: '' }],
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-empty:0\n0');
+      expect(onAction).toHaveBeenCalledWith('q-discord-empty', '', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('removes the buttons before the decision is dispatched', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-order', review);
+    const order: string[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async () => {
+      order.push('buttons removed');
+      return new Response(null, { status: 204 });
+    });
+    onAction.mockImplementation(() => order.push('decision dispatched'));
+    try {
+      await click({ id: 'clicker-1', username: 'clicker' });
+      expect(order).toEqual(['buttons removed', 'decision dispatched']);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('records the decision when the card edit fails or hangs', async () => {
+    for (const [questionId, outcome] of [
+      ['q-discord-fail', Promise.reject(new Error('Discord 400'))],
+      ['q-discord-hang', new Promise(() => {})],
+    ] as const) {
+      outcome.catch(() => {});
+      const { bridge, click, onAction, editMessage } = await startDiscord(questionId, review);
+      editMessage.mockReturnValueOnce(outcome as never);
+      try {
+        expect((await click({ id: 'clicker-1', username: 'clicker' })).status).toBe(200);
+        expect(onAction).toHaveBeenCalledWith(questionId, 'approve', 'clicker-1', expect.anything());
+        expect(ackBodies().at(-1)?.[1]).toEqual(ACK);
+      } finally {
+        await bridge.teardown();
+      }
+    }
+  });
+
+  it('keeps who decided when a selected label is longer than one text block', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-label', {
+      title: 'Review',
+      question: 'Allow?',
+      options: [{ label: 'Approve', selectedLabel: 'L'.repeat(2100), value: 'approve' }],
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'clicker', global_name: 'Clicker' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalled());
+      const edited = (editMessage.mock.calls[0] as unknown as [string, string, { card: CardElement }])[2];
+      const resolution = (edited.card.children.at(-1) as { content: string }).content;
+      expect(resolution.endsWith('… by Clicker')).toBe(true);
+      expect(resolution.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    } finally {
+      await bridge.teardown();
+    }
   });
 
   it.each([
