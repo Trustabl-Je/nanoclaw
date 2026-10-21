@@ -50,12 +50,13 @@ describe('dispatchResponse', () => {
     finish();
   });
 
-  it('counts a handler that still returns true (written before outcomes) as accepted', async () => {
+  it('counts a handler that still returns true (written before outcomes) as owning the click, showing nothing', async () => {
     const { dispatchResponse, registerResponseHandler } = await freshRegistry();
+    // Such handlers returned true for refused clicks too, so true can't show a decision.
     const legacy = async (): Promise<boolean> => true;
     registerResponseHandler(legacy);
 
-    expect(await dispatchResponse(click)).toBe('accepted');
+    expect(await dispatchResponse(click)).toBe('ignored');
   });
 
   it('treats an unowned or failed click as ignored', async () => {

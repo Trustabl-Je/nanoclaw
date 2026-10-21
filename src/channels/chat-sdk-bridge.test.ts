@@ -2180,9 +2180,10 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       name: 'discord',
       initialize: async () => {},
       handleWebhook: vi.fn(async () => new Response('ok')),
-      channelIdFromThreadId: (threadId: string) => threadId,
-      encodeThreadId: ({ guildId, channelId }: { guildId: string; channelId: string }) =>
-        `discord:${guildId}:${channelId}`,
+      // As the Discord adapter: a thread id is the channel's plus ':<thread>'.
+      channelIdFromThreadId: (threadId: string) => threadId.split(':').slice(0, 3).join(':'),
+      encodeThreadId: ({ guildId, channelId, threadId }: { guildId: string; channelId: string; threadId?: string }) =>
+        `discord:${guildId}:${channelId}${threadId ? `:${threadId}` : ''}`,
       editMessage,
     } as never) as Adapter & { startGatewayListener: unknown };
     adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
@@ -2202,7 +2203,11 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     });
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
     // Chat SDK 4.41+ encodes a button's custom_id as `${id}\n${value}`.
-    const click = (user: Record<string, string>, customId = `ncq:${questionId}:0\n0`) =>
+    const click = (
+      user: Record<string, string>,
+      customId = `ncq:${questionId}:0\n0`,
+      extra: Record<string, unknown> = {},
+    ) =>
       realFetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
@@ -2218,6 +2223,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
             data: { custom_id: customId },
             member: { user },
             message: { id: 'card-1', embeds: [{ title: 'T'.repeat(256), description: 'Allow?' }] },
+            ...extra,
           },
         }),
       });
@@ -2362,6 +2368,25 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(editMessage).not.toHaveBeenCalled();
       expect(discordCalls()).toHaveLength(2);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('addresses a click in a thread by its parent channel and the thread, as the adapter does', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-thread', review);
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
+        channel_id: 'T1',
+        channel: { id: 'T1', type: 11, parent_id: 'P1' },
+      });
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-thread', 'approve', 'clicker-1', {
+          messageId: 'card-1',
+          platformId: 'discord:G1:P1',
+          threadId: 'discord:G1:P1:T1',
+        }),
+      );
     } finally {
       await bridge.teardown();
     }
