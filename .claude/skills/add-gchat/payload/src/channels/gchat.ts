@@ -1,0 +1,96 @@
+/**
+ * Google Chat channel adapter (v2) — uses Chat SDK bridge.
+ * Self-registers on import.
+ */
+import { createPrivateKey } from 'crypto';
+
+import { createGoogleChatAdapter } from '@chat-adapter/gchat';
+
+import { readEnvFile } from '../env.js';
+import type { ChannelDefaults } from './adapter.js';
+import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { registerChannelAdapter } from './channel-registry.js';
+
+// A JSON.parse error quotes the start of its input, so never let it surface:
+// it would put part of the key in the startup log.
+function parseCredentials(raw: string): { client_email: string; private_key: string } {
+  let parsed: { client_email?: unknown; private_key?: unknown } | undefined;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+  }
+  const email = parsed?.client_email;
+  const key = parsed?.private_key;
+  if (typeof email !== 'string' || !email.includes('@') || typeof key !== 'string' || !isRsaKey(key)) {
+    throw new Error('GCHAT_CREDENTIALS in .env must be the service account JSON key on one line');
+  }
+  return { ...parsed, client_email: email, private_key: key };
+}
+
+// Google signs service account JWTs with RSA; any other key type fails at first use.
+function isRsaKey(pem: string): boolean {
+  try {
+    return createPrivateKey(pem).asymmetricKeyType === 'rsa';
+  } catch (err) {
+    if (!(err instanceof Error)) throw err;
+    return false;
+  }
+}
+
+function isHttpsUrl(value: string): boolean {
+  return URL.canParse(value) && new URL(value).protocol === 'https:';
+}
+
+/**
+ * Dedicated bot app on a threaded platform. 'mention' (not sticky) is the
+ * conservative group default; operators upgrade per wiring.
+ */
+const GCHAT_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention', threads: true, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
+
+registerChannelAdapter('gchat', {
+  factory: () => {
+    const env = readEnvFile([
+      'GCHAT_CREDENTIALS',
+      'GOOGLE_CHAT_BOT_USER_ID',
+      'GOOGLE_CHAT_ENDPOINT_URL',
+      'GOOGLE_CHAT_PROJECT_NUMBER',
+    ]);
+    if (!env.GCHAT_CREDENTIALS) return null;
+    const projectNumber = env.GOOGLE_CHAT_PROJECT_NUMBER;
+    if (!env.GOOGLE_CHAT_ENDPOINT_URL || !projectNumber || !/^\d+$/.test(projectNumber)) {
+      throw new Error(
+        'Google Chat needs GOOGLE_CHAT_ENDPOINT_URL and GOOGLE_CHAT_PROJECT_NUMBER (digits) in .env to verify webhooks',
+      );
+    }
+    if (!isHttpsUrl(env.GOOGLE_CHAT_ENDPOINT_URL)) {
+      throw new Error('GOOGLE_CHAT_ENDPOINT_URL in .env must be an https URL');
+    }
+    const credentials = parseCredentials(env.GCHAT_CREDENTIALS);
+    const gchatAdapter = createGoogleChatAdapter({
+      credentials,
+      // Adapters >= 4.40 no longer learn their own id from mentions; without
+      // it, @mentions in spaces never count as mentions. Spread, because 4.29
+      // has no botUserId option (it learns the id itself).
+      ...(env.GOOGLE_CHAT_BOT_USER_ID ? { botUserId: env.GOOGLE_CHAT_BOT_USER_ID } : {}),
+      // The adapter only reads Workspace add-on events, and add-on webhooks
+      // are signed for the endpoint URL by this per-project service account.
+      // Spread, because 4.29 has no workspaceAddOnServiceAccountEmail option.
+      ...{
+        endpointUrl: env.GOOGLE_CHAT_ENDPOINT_URL,
+        workspaceAddOnServiceAccountEmail: `service-${projectNumber}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`,
+      },
+    });
+    return createChatSdkBridge({
+      adapter: gchatAdapter,
+      concurrency: 'concurrent',
+      supportsThreads: true,
+      defaults: GCHAT_DEFAULTS,
+    });
+  },
+  defaults: GCHAT_DEFAULTS,
+});
