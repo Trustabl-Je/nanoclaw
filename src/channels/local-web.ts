@@ -465,19 +465,18 @@ function createAdapter(): ChannelAdapter {
         sendJson(res, 403, { error: 'Only an approver can answer this.' });
         return;
       }
-      if (outcome !== 'accepted') {
+      if (outcome !== 'accepted' && outcome !== 'closed') {
         sendJson(res, 409, { error: 'This question is no longer pending.' });
         return;
       }
       // A card the host updates itself (a gateway approval) gets its final text from there.
-      if (!render.deferResolution) {
-        publish(platformId, {
-          type: 'question-resolution',
-          questionId: parsed.questionId,
-          resolution: selected.selectedLabel,
-        });
+      if (outcome === 'accepted' && render.deferResolution) {
+        sendJson(res, 202, { ok: true });
+        return;
       }
-      sendJson(res, 202, { ok: true });
+      const resolution = outcome === 'closed' ? 'No longer available' : selected.selectedLabel;
+      publish(platformId, { type: 'question-resolution', questionId: parsed.questionId, resolution });
+      sendJson(res, 202, { ok: true, resolution });
       return;
     }
 

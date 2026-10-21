@@ -1,6 +1,6 @@
 /**
  * A WhatsApp Cloud button reply arrives as its own message, so its id is not
- * the card's: the bridge must name no card to the host for these clicks.
+ * the card's: the bridge names the card the reply quotes instead.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -24,8 +24,10 @@ vi.mock('./chat-sdk-bridge.js', () => ({
 import { whatsappCloudRegistration } from './whatsapp-cloud.js';
 
 describe('whatsapp-cloud clicks', () => {
-  it('tells the bridge a click is not the card message', async () => {
+  it('names the card a button reply quotes', async () => {
     await whatsappCloudRegistration.factory();
-    expect(captured.config?.actionMessageIsCard).toBe(false);
+    const cardMessageIdOf = captured.config?.cardMessageIdOf as (event: { raw: unknown }) => string | undefined;
+    expect(cardMessageIdOf({ raw: { id: 'wamid.reply', context: { id: 'wamid.card' } } })).toBe('wamid.card');
+    expect(cardMessageIdOf({ raw: { id: 'wamid.reply' } })).toBeUndefined();
   });
 });

@@ -115,12 +115,15 @@ function optionToCommand(option: string): string {
 }
 
 type PendingQuestion = { questionId: string; options: NormalizedOption[] };
+/** Questions whose answer is with the host right now. */
+const answering = new WeakSet<PendingQuestion>();
 
 /**
  * Answers a pending question from a "/option" reply. The host decides: the chat
  * hears the answer only once it is accepted, and a refused one keeps the
  * question open for an approver (WhatsApp has no private reply, so nothing is
- * posted). Undefined when the text answers no pending question.
+ * posted). One answer at a time: a reply while another is with the host is
+ * swallowed. Undefined when the text answers no pending question.
  */
 export async function answerPendingQuestion(
   pendingQuestions: Map<string, PendingQuestion>,
@@ -135,10 +138,16 @@ export async function answerPendingQuestion(
   const cmd = text.trim().toLowerCase();
   const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
   if (!matched) return undefined;
-  const outcome = await onAction(pending.questionId, matched.value, sender);
-  if (outcome !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
-  if (outcome === 'accepted') await confirm(matched);
-  return { questionId: pending.questionId, value: matched.value, outcome };
+  if (answering.has(pending)) return { questionId: pending.questionId, value: matched.value, outcome: undefined };
+  answering.add(pending);
+  try {
+    const outcome = await onAction(pending.questionId, matched.value, sender);
+    if (outcome !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+    if (outcome === 'accepted') await confirm(matched);
+    return { questionId: pending.questionId, value: matched.value, outcome };
+  } finally {
+    answering.delete(pending);
+  }
 }
 
 // --- Markdown → WhatsApp formatting ---

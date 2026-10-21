@@ -47,7 +47,7 @@ async function startAdapter(options: { routeMessages?: boolean } = {}) {
   const inbound: Array<{ platformId: string; threadId: string | null; message: InboundMessage }> = [];
   const actions: Array<{ questionId: string; selectedOption: string; userId: string }> = [];
   // What the host does with the next answer.
-  const host = { outcome: 'accepted' as 'accepted' | 'refused' | 'ignored' };
+  const host = { outcome: 'accepted' as 'accepted' | 'refused' | 'closed' | 'ignored' };
   await registry.initChannelAdapters(() => ({
     onInbound: async (platformId, threadId, message) => {
       inbound.push({ platformId, threadId, message });
@@ -635,12 +635,71 @@ describe('local web adapter', () => {
       expect(await refused.json()).toEqual({ error: 'Only an approver can answer this.' });
 
       host.outcome = 'accepted';
-      expect((await answer()).status).toBe(202);
+      const accepted = await answer();
+      expect(accepted.status).toBe(202);
+      // The browser shows the resolution the server gives it.
+      expect(await accepted.json()).toEqual({ ok: true, resolution: 'Approved' });
       expect(actions).toHaveLength(2);
       // The first event after both answers is the one resolution: the refused answer published nothing.
       expect(new TextDecoder().decode((await reader.read()).value)).toContain(
         '"type":"question-resolution","questionId":"appr-local-refused","resolution":"Approved"',
       );
+    } finally {
+      abort.abort();
+      await registry.teardownChannelAdapters();
+    }
+  });
+
+  it('closes a question the host closed, so the browser shows it is no longer available', async () => {
+    const { registry, host, url, auth } = await startAdapter();
+    const abort = new AbortController();
+    try {
+      const { createPendingApproval } = await import('../db/sessions.js');
+      await createPendingApproval({
+        approval_id: 'appr-local-closed',
+        request_id: 'appr-local-closed',
+        action: 'create_agent',
+        payload: '{}',
+        agent_group_id: 'ag-web',
+        channel_type: 'local-web',
+        platform_id: 'local-web:local',
+        instance: 'local-web',
+        created_at: new Date().toISOString(),
+        title: 'Create an agent?',
+        question: 'Q',
+        options_json: JSON.stringify([{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }]),
+      });
+      const response = await fetch(`${url}/events?conversationId=mg-web`, {
+        headers: { ...auth, origin: url },
+        signal: abort.signal,
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await registry.createChannelDeliveryAdapter().deliver(
+        'local-web',
+        'local-web:local',
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          type: 'ask_question',
+          questionId: 'appr-local-closed',
+          title: 'Create?',
+          question: 'Q',
+          options: [],
+        }),
+        undefined,
+        'local-web',
+      );
+      await reader.read();
+      host.outcome = 'closed';
+      const answered = await fetch(`${url}/api/actions`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json', origin: url },
+        body: JSON.stringify({ conversationId: 'mg-web', questionId: 'appr-local-closed', option: 0 }),
+      });
+      expect(answered.status).toBe(202);
+      expect(await answered.json()).toEqual({ ok: true, resolution: 'No longer available' });
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('"resolution":"No longer available"');
     } finally {
       abort.abort();
       await registry.teardownChannelAdapters();
@@ -694,6 +753,8 @@ describe('local web adapter', () => {
         body: JSON.stringify({ conversationId: 'mg-web', questionId: 'appr-local-gateway', option: 0 }),
       });
       expect(answered.status).toBe(202);
+      // No resolution for the browser to draw over the coordinator's final text.
+      expect(await answered.json()).toEqual({ ok: true });
       // The coordinator posts the final text (which can carry more than "Approved"); nothing comes from here.
       const next = await Promise.race([
         reader.read().then((chunk) => new TextDecoder().decode(chunk.value)),

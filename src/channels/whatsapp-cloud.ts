@@ -122,8 +122,8 @@ export const whatsappCloudRegistration: ChannelRegistration = {
       supportsThreads: false,
       defaults: WHATSAPP_CLOUD_DEFAULTS,
       cardFits: fitsWhatsAppCard,
-      // A button reply is a new message: its id isn't the card's.
-      actionMessageIsCard: false,
+      // A button reply is a new message quoting the card: name the card.
+      cardMessageIdOf: (event) => (event.raw as { context?: { id?: string } } | undefined)?.context?.id,
     });
   },
   defaults: WHATSAPP_CLOUD_DEFAULTS,

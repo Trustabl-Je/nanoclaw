@@ -99,6 +99,27 @@ describe('answerPendingQuestion', () => {
     expect(questions.get('chat@g.us')).toBe(newer);
   });
 
+  it('takes one answer at a time: a second reply while the first is with the host is swallowed', async () => {
+    const questions = fresh();
+    let decide!: (outcome: 'accepted' | 'refused') => void;
+    const onAction = vi.fn(() => new Promise<'accepted' | 'refused'>((resolve) => (decide = resolve)));
+    const first = answerPendingQuestion(questions, 'chat@g.us', '/approve', 'a@s.whatsapp.net', onAction, vi.fn());
+    const second = await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'b@s.whatsapp.net',
+      onAction,
+      vi.fn(),
+    );
+    expect(second).toEqual({ questionId: 'q1', value: 'approve', outcome: undefined });
+    decide('refused');
+    await first;
+    expect(onAction).toHaveBeenCalledTimes(1);
+    // Refused: the question is open again for an approver.
+    expect(questions.has('chat@g.us')).toBe(true);
+  });
+
   it('is not an answer when no question is pending or the command matches no option', async () => {
     const onAction = vi.fn();
     expect(await answerPendingQuestion(fresh(), 'chat@g.us', '/later', 'u', onAction, vi.fn())).toBeUndefined();
