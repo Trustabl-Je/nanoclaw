@@ -99,25 +99,44 @@ describe('answerPendingQuestion', () => {
     expect(questions.get('chat@g.us')).toBe(newer);
   });
 
-  it('takes one answer at a time: a second reply while the first is with the host is swallowed', async () => {
+  it('queues a second answer behind the first: after a refusal it still counts', async () => {
     const questions = fresh();
-    let decide!: (outcome: 'accepted' | 'refused') => void;
-    const onAction = vi.fn(() => new Promise<'accepted' | 'refused'>((resolve) => (decide = resolve)));
-    const first = answerPendingQuestion(questions, 'chat@g.us', '/approve', 'a@s.whatsapp.net', onAction, vi.fn());
-    const second = await answerPendingQuestion(
+    let decideFirst!: (outcome: 'accepted' | 'refused') => void;
+    const onAction = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<'accepted' | 'refused'>((resolve) => (decideFirst = resolve)))
+      .mockResolvedValueOnce('accepted');
+    const confirm = vi.fn(async () => undefined);
+    const first = answerPendingQuestion(
       questions,
       'chat@g.us',
       '/approve',
-      'b@s.whatsapp.net',
+      'bystander@s.whatsapp.net',
       onAction,
-      vi.fn(),
+      confirm,
     );
-    expect(second).toEqual({ questionId: 'q1', value: 'approve', outcome: undefined });
-    decide('refused');
-    await first;
+    const second = answerPendingQuestion(questions, 'chat@g.us', '/approve', 'owner@s.whatsapp.net', onAction, confirm);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The second waits for the host's answer to the first.
     expect(onAction).toHaveBeenCalledTimes(1);
-    // Refused: the question is open again for an approver.
-    expect(questions.has('chat@g.us')).toBe(true);
+    decideFirst('refused');
+    expect((await first)?.outcome).toBe('refused');
+    expect((await second)?.outcome).toBe('accepted');
+    expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander@s.whatsapp.net', 'owner@s.whatsapp.net']);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(questions.has('chat@g.us')).toBe(false);
+  });
+
+  it('a queued answer to a question the first answer closed is swallowed, not sent to the agent', async () => {
+    const questions = fresh();
+    const onAction = vi.fn(async () => 'accepted' as const);
+    const [first, second] = await Promise.all([
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'a@s.whatsapp.net', onAction, vi.fn()),
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'b@s.whatsapp.net', onAction, vi.fn()),
+    ]);
+    expect(first?.outcome).toBe('accepted');
+    expect(second).toEqual({ questionId: 'q1', value: 'approve', outcome: undefined });
+    expect(onAction).toHaveBeenCalledTimes(1);
   });
 
   it('is not an answer when no question is pending or the command matches no option', async () => {

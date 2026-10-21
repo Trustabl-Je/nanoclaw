@@ -115,15 +115,16 @@ function optionToCommand(option: string): string {
 }
 
 type PendingQuestion = { questionId: string; options: NormalizedOption[] };
-/** Questions whose answer is with the host right now. */
-const answering = new WeakSet<PendingQuestion>();
+/** Per question, the answer with the host right now: a later answer waits for it. */
+const answering = new WeakMap<PendingQuestion, Promise<unknown>>();
 
 /**
  * Answers a pending question from a "/option" reply. The host decides: the chat
  * hears the answer only once it is accepted, and a refused one keeps the
  * question open for an approver (WhatsApp has no private reply, so nothing is
- * posted). One answer at a time: a reply while another is with the host is
- * swallowed. Undefined when the text answers no pending question.
+ * posted). One answer at a time: a later reply waits for the earlier one and
+ * counts only if the question is still open (so an approver's answer after a
+ * refused one still counts). Undefined when the text answers no pending question.
  */
 export async function answerPendingQuestion(
   pendingQuestions: Map<string, PendingQuestion>,
@@ -138,16 +139,19 @@ export async function answerPendingQuestion(
   const cmd = text.trim().toLowerCase();
   const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
   if (!matched) return undefined;
-  if (answering.has(pending)) return { questionId: pending.questionId, value: matched.value, outcome: undefined };
-  answering.add(pending);
-  try {
+  const turn = (answering.get(pending) ?? Promise.resolve()).then(async () => {
+    // Closed by the answer before this one: swallowed, not sent to the agent.
+    if (pendingQuestions.get(chatJid) !== pending) return undefined;
     const outcome = await onAction(pending.questionId, matched.value, sender);
     if (outcome !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
     if (outcome === 'accepted') await confirm(matched);
-    return { questionId: pending.questionId, value: matched.value, outcome };
-  } finally {
-    answering.delete(pending);
-  }
+    return outcome;
+  });
+  answering.set(
+    pending,
+    turn.catch(() => undefined),
+  );
+  return { questionId: pending.questionId, value: matched.value, outcome: await turn };
 }
 
 // --- Markdown → WhatsApp formatting ---
