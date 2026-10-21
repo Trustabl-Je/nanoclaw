@@ -128,6 +128,39 @@ describe('approval response authorization', () => {
     expect(await getPendingApproval('appr-2')).toBeUndefined();
   });
 
+  it('closes an approval whose session is gone, so its card can say it is no longer available', async () => {
+    await upsertUser({ id: 'telegram:owner-gone', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner-gone',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await createPendingApproval({
+      approval_id: 'appr-gone',
+      session_id: null,
+      agent_group_id: 'ag-1',
+      request_id: 'appr-gone',
+      action: 'install_packages',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Install packages',
+      options_json: JSON.stringify([]),
+    });
+    const outcome = await handleApprovalsResponse({
+      questionId: 'appr-gone',
+      value: 'approve',
+      userId: 'owner-gone',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+    expect(outcome).toBe('closed');
+    expect(await getPendingApproval('appr-gone')).toBeUndefined();
+  });
+
   it('lets only one concurrent approval response run the action handler', async () => {
     await upsertUser({ id: 'telegram:owner-race', kind: 'telegram', display_name: 'Owner', created_at: now() });
     await grantRole({

@@ -249,6 +249,34 @@ describe('unknown-sender request_approval flow', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('decides once when an approve and a reject arrive together', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('let me in')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    const click = (value: string) =>
+      dispatchResponse({
+        questionId: pending.id,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+
+    const outcomes = await Promise.all([click('approve'), click('reject')]);
+    // Only one of them decided, so only one can be shown or confirmed.
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    const member = await getDb().get(
+      'SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
+      'tg:stranger',
+      'ag-1',
+    );
+    expect(member !== undefined).toBe(outcomes[0] === 'accepted');
+  });
+
   it('deny → deletes the pending row without adding a member', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');

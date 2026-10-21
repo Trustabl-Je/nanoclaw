@@ -27,7 +27,7 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
   if (!session) {
     log.warn('Session not found for pending question', { questionId: payload.questionId, sessionId: pq.session_id });
     await deletePendingQuestion(payload.questionId);
-    return 'ignored'; // ours, but the session that asked is gone
+    return 'closed'; // ours, but the session that asked is gone
   }
 
   await writeSessionMessage(session.agent_group_id, session.id, {

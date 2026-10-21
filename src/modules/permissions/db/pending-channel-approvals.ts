@@ -23,6 +23,8 @@ export interface PendingChannelApproval {
   question: string;
   /** Normalized options (JSON-encoded NormalizedOption[]) — same shape persisted on pending_approvals. */
   options_json: string;
+  /** The card the question lives on; only its clicks count. NULL = not recorded, '' = a new card on its way. */
+  card_message_id?: string | null;
 }
 
 export async function createPendingChannelApproval(row: PendingChannelApproval): Promise<void> {
@@ -54,6 +56,7 @@ export async function hasInFlightChannelApproval(messagingGroupId: string): Prom
   return row !== undefined;
 }
 
+/** The question moves to a new card: no card counts until setPendingChannelApprovalCardMessage names it. */
 export async function updatePendingChannelApprovalCard(
   messagingGroupId: string,
   title: string,
@@ -61,10 +64,22 @@ export async function updatePendingChannelApprovalCard(
   optionsJson: string,
 ): Promise<void> {
   await getDb().run(
-    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ?',
+    `UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ?, card_message_id = ''
+       WHERE messaging_group_id = ?`,
     title,
     question,
     optionsJson,
+    messagingGroupId,
+  );
+}
+
+export async function setPendingChannelApprovalCardMessage(
+  messagingGroupId: string,
+  messageId: string | null,
+): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_channel_approvals SET card_message_id = ? WHERE messaging_group_id = ?',
+    messageId,
     messagingGroupId,
   );
 }

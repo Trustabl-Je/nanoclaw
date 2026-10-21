@@ -11,7 +11,8 @@
  *      via finalizeReject.
  *
  * The response handler is registered via core's `registerResponseHandler`;
- * core iterates handlers and the first one to return `true` claims the response.
+ * core offers a click to each handler in turn, and the first to return an
+ * outcome owns it.
  */
 import { requestWake } from '../../request-wake.js';
 import {
@@ -52,14 +53,15 @@ async function handleRegisteredApproval(
   userId: string,
   accepted?: () => void,
 ): Promise<ResponseOutcome> {
+  // The session that asked is gone: so is the request.
   if (!approval.session_id) {
     await deletePendingApproval(approval.approval_id);
-    return 'ignored';
+    return 'closed';
   }
   const session = await getSession(approval.session_id);
   if (!session) {
     await deletePendingApproval(approval.approval_id);
-    return 'ignored';
+    return 'closed';
   }
 
   // "Reject with reason…" — hold the row and capture the admin's next DM

@@ -50,6 +50,7 @@ import { addMember } from './db/agent-group-members.js';
 import {
   deletePendingChannelApproval,
   getPendingChannelApproval,
+  setPendingChannelApprovalCardMessage,
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
@@ -295,6 +296,11 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<R
   const approverId = clickerId;
   const approved = payload.value === 'approve';
 
+  // Deleting the row claims the decision: of two responses, only one proceeds.
+  // On approve it also clears the row BEFORE re-routing, so the gate check on
+  // the second attempt doesn't see the in-flight row and short-circuit.
+  if (!(await deletePendingSenderApproval(row.id))) return 'ignored';
+
   if (approved) {
     await addMember({
       user_id: row.sender_identity,
@@ -308,10 +314,6 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<R
       agentGroupId: row.agent_group_id,
       approverId,
     });
-
-    // Clear the pending row BEFORE re-routing so the gate check on the
-    // second attempt doesn't see the in-flight row and short-circuit.
-    await deletePendingSenderApproval(row.id);
 
     try {
       const event = JSON.parse(row.original_message) as InboundEvent;
@@ -328,7 +330,6 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<R
     agentGroupId: row.agent_group_id,
     approverId,
   });
-  await deletePendingSenderApproval(row.id);
   return 'accepted';
 }
 
@@ -456,6 +457,12 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   const row = await getPendingChannelApproval(payload.questionId);
   if (!row) return false;
 
+  // Only a click from the card the question lives on counts: after the agent
+  // choice, an old card or a copy of it must not resolve against the new options.
+  if (row.card_message_id != null && payload.messageId !== undefined && payload.messageId !== row.card_message_id) {
+    return 'ignored';
+  }
+
   // Click authorization is the guard's channels.register decision (./guard.ts):
   // the delivered approver, or an admin of the pending row's anchor agent group.
   const clickerId = payload.userId
@@ -510,13 +517,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const options = await buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
     const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
-    // The first card is answered before its question takes the new options, so
-    // none of its buttons can resolve against them (even across a restart).
-    payload.accepted?.();
     await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {
-      await adapter.deliver(
+      const cardId = await adapter.deliver(
         approverDm.channel_type,
         approverDm.platform_id,
         null,
@@ -531,14 +535,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         undefined,
         approverDm.instance,
       );
+      await setPendingChannelApprovalCardMessage(row.messaging_group_id, cardId ?? null);
     } catch (err) {
+      // No card counts now: a lost response can't tell a posted card from none.
       log.error('Channel registration: agent-selection card delivery failed', {
         messagingGroupId: row.messaging_group_id,
         err,
       });
     }
-    // Accepted even when delivery reports a failure: the choice card may still have
-    // arrived, so the first card must not take clicks against the new options.
     return 'accepted';
   }
 
@@ -603,7 +607,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
       });
       await deletePendingChannelApproval(row.messaging_group_id);
-      return 'ignored';
+      return 'closed';
     }
     if (!(await hasAdminPrivilege(approverId, targetAgentGroupId))) {
       log.warn('Channel registration: target agent group rejected for unauthorized approver', {
@@ -622,7 +626,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
 
   // ── Wire + replay (shared path for connect and create) ──
-  return (await wireApprovedChannel(row, targetAgentGroupId, approverId)) ? 'accepted' : 'ignored';
+  // A failed wiring drops the row: the request is gone.
+  return (await wireApprovedChannel(row, targetAgentGroupId, approverId)) ? 'accepted' : 'closed';
 }
 
 registerResponseHandler(handleChannelApprovalResponse);
