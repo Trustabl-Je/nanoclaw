@@ -1070,7 +1070,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
         const selectedOption = resolveSelectedOption(render, event.value, tail);
-        if (render?.deferResolution) {
+        // No render: already resolved (a late or repeated click), or a pending row
+        // without stored render metadata. The host decides; the card stays as it is.
+        if (!render || render.deferResolution) {
           setupConfig.onAction(questionId, selectedOption, userId, {
             instance: instanceKey,
             messageId: event.messageId,
@@ -1497,6 +1499,19 @@ async function handleForwardedEvent(
         (interaction.user as Record<string, string> | undefined);
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
+      /** Answers within Discord's 3 s; a failed ack must never drop the decision dispatched after it. */
+      const ack = async (response: Record<string, unknown>) => {
+        try {
+          const result = await fetch(
+            `https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(response) },
+          );
+          if (!result.ok) log.error('Failed to acknowledge interaction', { status: result.status });
+          // eslint-disable-next-line no-catch-all/no-catch-all -- the decision is dispatched either way
+        } catch (err) {
+          log.error('Failed to acknowledge interaction', { err });
+        }
+      };
 
       // Parse the selected option from custom_id. The adapter writes
       // `${buttonId}\n${value}` (Chat SDK 4.41+); older cards carry the id alone.
@@ -1521,12 +1536,21 @@ async function handleForwardedEvent(
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, encodedValue ?? tail, tail);
+      if (!questionId || !render) {
+        // Not one of our questions, already resolved (a late, repeated or
+        // re-delivered click), or a pending row without stored render metadata:
+        // ack, let the host decide, and leave the card as it is.
+        await ack({ type: 6 });
+        if (questionId && selectedOption) {
+          setupConfig.onAction(questionId, selectedOption, user?.id || '', {
+            messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+            platformId: interaction.channel_id as string | undefined,
+          });
+        }
+        return;
+      }
       if (render?.deferResolution && questionId) {
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 6 }),
-        });
+        await ack({ type: 6 });
         setupConfig.onAction(questionId, selectedOption, user?.id || '', {
           messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
           platformId: interaction.channel_id as string | undefined,
@@ -1538,19 +1562,9 @@ async function handleForwardedEvent(
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
       const actorName = user?.global_name || user?.username || '';
       const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
-      try {
-        // Ack within Discord's 3 s and remove the buttons in the same call
-        // (UPDATE_MESSAGE with components only: the embed stays, so no length
-        // limit can reject it), before the decision is dispatched.
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 7, data: { components: [] } }),
-        });
-        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed ack must not drop the recorded decision
-      } catch (err) {
-        log.error('Failed to acknowledge interaction', { err });
-      }
+      // Ack and remove the buttons in the same call (UPDATE_MESSAGE with components
+      // only: the embed stays, so no length limit can reject it), before the decision.
+      await ack({ type: 7, data: { components: [] } });
 
       // Record the decision before any card update, which can fail or stall.
       // An empty value counts when it is a real option's value.

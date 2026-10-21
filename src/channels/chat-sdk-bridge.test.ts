@@ -1721,6 +1721,43 @@ it('keeps who decided when a channel cap forces a long label to be cut', async (
   }
 });
 
+it('leaves an already resolved card alone when a late click arrives', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  await runMigrations(await initTestDb());
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const onAction = vi.fn();
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-late', supportsThreads: false });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:already-resolved:0',
+        adapter,
+        messageId: 'resolved-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected', userName: 'Ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(editMessage).not.toHaveBeenCalled();
+    // The host decides: it ignores a resolved question, and still handles a pending row without render metadata.
+    expect(onAction).toHaveBeenCalledWith('already-resolved', '0', 'selected', expect.anything());
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
 describe('createChatSdkBridge — local Gateway webhook', () => {
   // The Gateway listener forwards raw events to a loopback server; only it may
   // post there. It sends the bot token in x-discord-gateway-token.
@@ -1916,6 +1953,45 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     }
   });
 
+  it('leaves an already resolved Discord card alone when a late click arrives', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-other', review);
+    try {
+      expect((await click({ id: 'clicker-1', username: 'Ann' }, 'ncq:q-discord-resolved:0\n0')).status).toBe(200);
+      expect(ackBodies()).toEqual([
+        ['https://discord.com/api/v10/interactions/interaction-2/interaction-token/callback', { type: 6 }],
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(onAction).toHaveBeenCalledWith('q-discord-resolved', '0', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('still dispatches a click when the Discord ack fails', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ackfail', review);
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error('ECONNRESET'));
+    try {
+      // One with stored render metadata, one without (a migrated pending row): both reach the host.
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await click({ id: 'clicker-1', username: 'Ann' }, 'ncq:q-discord-no-render:0\n0');
+      expect(onAction.mock.calls.map((call) => call[0])).toEqual(['q-discord-ackfail', 'q-discord-no-render']);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('still dispatches a gateway (deferred) click when the Discord ack fails', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-deferred', { ...review, deferResolution: true });
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error('ECONNRESET'));
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      expect(onAction).toHaveBeenCalledWith('q-discord-deferred', 'approve', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
   it('records the decision when the card edit fails or hangs', async () => {
     for (const [questionId, outcome] of [
       ['q-discord-fail', Promise.reject(new Error('Discord 400'))],
@@ -2000,6 +2076,13 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
   });
 
   it('dispatches clicks and forwards other events when the gateway token matches', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    // A pending question has a render; one without is already resolved and left alone.
+    registerQuestionRenderResolver((id) =>
+      id === 'q-1'
+        ? { title: 'Review', options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }] }
+        : undefined,
+    );
     const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
     try {
       const auth = { 'x-discord-gateway-token': BOT_TOKEN };
