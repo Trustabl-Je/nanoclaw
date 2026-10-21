@@ -635,6 +635,36 @@ describe('unknown-channel registration flow', () => {
     ).toBe(1);
   });
 
+  it('a Reject racing a connect decides once: never both wired and denied', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-reject-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const click = (value: string) =>
+      dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([click('connect:ag-1'), click('reject')]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    const wired = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      questionId,
+    );
+    const denied = (await getDb().get<{ denied_at: string | null }>(
+      'SELECT denied_at FROM messaging_groups WHERE id = ?',
+      questionId,
+    ))!.denied_at;
+    expect(wired === 1 && denied !== null).toBe(false);
+  });
+
   it('reports a connect accepted once the wiring is recorded, before the message is replayed', async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');

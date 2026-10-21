@@ -11,7 +11,7 @@
  * modularizing it adds more registry surface than it saves.
  */
 import { getDb, hasTable } from '../../db/connection.js';
-import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
+import { createPendingQuestion, deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
@@ -32,22 +32,29 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
 
   // Deleting the row claims the answer: of two answers, only one reaches the agent.
   if (!(await deletePendingQuestion(payload.questionId))) return 'ignored';
+  try {
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: `qr-${payload.questionId}-${Date.now()}`,
+      kind: 'system',
+      timestamp: new Date().toISOString(),
+      platformId: pq.platform_id,
+      channelType: pq.channel_type,
+      threadId: pq.thread_id,
+      content: JSON.stringify({
+        type: 'question_response',
+        questionId: payload.questionId,
+        selectedOption: payload.value,
+        userId: payload.userId ?? '',
+      }),
+    });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- rethrown once the question is back
+  } catch (err) {
+    // Not delivered: put the question back so it can be answered again.
+    await createPendingQuestion(pq);
+    throw err;
+  }
+  // Delivered: the card can show the answer while the agent wakes.
   payload.accepted?.();
-
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `qr-${payload.questionId}-${Date.now()}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    platformId: pq.platform_id,
-    channelType: pq.channel_type,
-    threadId: pq.thread_id,
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: payload.questionId,
-      selectedOption: payload.value,
-      userId: payload.userId ?? '',
-    }),
-  });
 
   log.info('Question response routed', {
     questionId: payload.questionId,
