@@ -46,6 +46,8 @@ async function startAdapter(options: { routeMessages?: boolean } = {}) {
   await import('./local-web.js');
   const inbound: Array<{ platformId: string; threadId: string | null; message: InboundMessage }> = [];
   const actions: Array<{ questionId: string; selectedOption: string; userId: string }> = [];
+  // What the host does with the next answer.
+  const host = { outcome: 'accepted' as 'accepted' | 'refused' | 'ignored' };
   await registry.initChannelAdapters(() => ({
     onInbound: async (platformId, threadId, message) => {
       inbound.push({ platformId, threadId, message });
@@ -68,12 +70,15 @@ async function startAdapter(options: { routeMessages?: boolean } = {}) {
     },
     onInboundEvent: () => {},
     onMetadata: () => {},
-    onAction: (questionId, selectedOption, userId) => void actions.push({ questionId, selectedOption, userId }),
+    onAction: async (questionId, selectedOption, userId) => {
+      actions.push({ questionId, selectedOption, userId });
+      return host.outcome;
+    },
   }));
   const auth = {
     'x-nanoclaw-local-web-token': fs.readFileSync(path.join(TEST_DATA_DIR, 'local-web', 'token'), 'utf8').trim(),
   };
-  return { registry, inbound, actions, url: `http://127.0.0.1:${port}`, auth };
+  return { registry, inbound, actions, host, url: `http://127.0.0.1:${port}`, auth };
 }
 
 async function seedLegacyConversation(): Promise<void> {
@@ -570,6 +575,72 @@ describe('local web adapter', () => {
         'local-web',
       );
       expect(new TextDecoder().decode((await reader.read()).value)).toContain('"resolution":"Timed out"');
+    } finally {
+      abort.abort();
+      await registry.teardownChannelAdapters();
+    }
+  });
+
+  it('keeps a question open when the host refuses the answer, and shows it resolved only once accepted', async () => {
+    const { registry, actions, host, url, auth } = await startAdapter();
+    const abort = new AbortController();
+    try {
+      const { createPendingApproval } = await import('../db/sessions.js');
+      await createPendingApproval({
+        approval_id: 'appr-local-refused',
+        request_id: 'appr-local-refused',
+        action: 'create_agent',
+        payload: '{}',
+        agent_group_id: 'ag-web',
+        channel_type: 'local-web',
+        platform_id: 'local-web:local',
+        instance: 'local-web',
+        created_at: new Date().toISOString(),
+        title: 'Create an agent?',
+        question: 'This creates a persistent agent.',
+        options_json: JSON.stringify([{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }]),
+      });
+      const response = await fetch(`${url}/events?conversationId=mg-web`, {
+        headers: { ...auth, origin: url },
+        signal: abort.signal,
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await registry.createChannelDeliveryAdapter().deliver(
+        'local-web',
+        'local-web:local',
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          type: 'ask_question',
+          questionId: 'appr-local-refused',
+          title: 'Create an agent?',
+          question: 'Q',
+          options: [],
+        }),
+        undefined,
+        'local-web',
+      );
+      await reader.read();
+      const answer = () =>
+        fetch(`${url}/api/actions`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json', origin: url },
+          body: JSON.stringify({ conversationId: 'mg-web', questionId: 'appr-local-refused', option: 0 }),
+        });
+
+      host.outcome = 'refused';
+      const refused = await answer();
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toEqual({ error: 'Only an approver can answer this.' });
+
+      host.outcome = 'accepted';
+      expect((await answer()).status).toBe(202);
+      expect(actions).toHaveLength(2);
+      // The first event after both answers is the one resolution: the refused answer published nothing.
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+        '"type":"question-resolution","questionId":"appr-local-refused","resolution":"Approved"',
+      );
     } finally {
       abort.abort();
       await registry.teardownChannelAdapters();

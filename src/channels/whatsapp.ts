@@ -43,6 +43,7 @@ import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import type { ResponseOutcome } from '../response-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type {
   ChannelAdapter,
@@ -111,6 +112,33 @@ const PENDING_QUESTIONS_MAX = 64;
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
 function optionToCommand(option: string): string {
   return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
+
+type PendingQuestion = { questionId: string; options: NormalizedOption[] };
+
+/**
+ * Answers a pending question from a "/option" reply. The host decides: the chat
+ * hears the answer only once it is accepted, and a refused one keeps the
+ * question open for an approver (WhatsApp has no private reply, so nothing is
+ * posted). Undefined when the text answers no pending question.
+ */
+export async function answerPendingQuestion(
+  pendingQuestions: Map<string, PendingQuestion>,
+  chatJid: string,
+  text: string,
+  sender: string,
+  onAction: ChannelSetup['onAction'],
+  confirm: (option: NormalizedOption) => Promise<unknown>,
+): Promise<{ questionId: string; value: string; outcome: ResponseOutcome | void } | undefined> {
+  const pending = pendingQuestions.get(chatJid);
+  if (!pending || !text.startsWith('/')) return undefined;
+  const cmd = text.trim().toLowerCase();
+  const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
+  if (!matched) return undefined;
+  const outcome = await onAction(pending.questionId, matched.value, sender);
+  if (outcome !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+  if (outcome === 'accepted') await confirm(matched);
+  return { questionId: pending.questionId, value: matched.value, outcome };
 }
 
 // --- Markdown → WhatsApp formatting ---
@@ -440,13 +468,7 @@ registerChannelAdapter('whatsapp', {
 
     // Pending questions: chatJid → { questionId, options }
     // User replies with /approve, /reject, etc. to answer
-    const pendingQuestions = new Map<
-      string,
-      {
-        questionId: string;
-        options: NormalizedOption[];
-      }
-    >();
+    const pendingQuestions = new Map<string, PendingQuestion>();
 
     // Group sync tracking
     let lastGroupSync = 0;
@@ -888,22 +910,18 @@ registerChannelAdapter('whatsapp', {
             const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
 
             // Check if this reply answers a pending question via slash command
-            const pending = pendingQuestions.get(chatJid);
-            if (pending && content.startsWith('/')) {
-              const cmd = content.trim().toLowerCase();
-              const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
-              if (matched) {
-                const voterName = msg.pushName || sender.split('@')[0];
-                setupConfig.onAction(pending.questionId, matched.value, sender);
-                pendingQuestions.delete(chatJid);
-                await sendRawMessage(chatJid, `${matched.selectedLabel} by ${voterName}`);
-                log.info('Question answered', {
-                  questionId: pending.questionId,
-                  value: matched.value,
-                  voterName,
-                });
-                continue; // Don't forward this reply to the agent
-              }
+            const voterName = msg.pushName || sender.split('@')[0];
+            const answered = await answerPendingQuestion(
+              pendingQuestions,
+              chatJid,
+              content,
+              sender,
+              (...args) => setupConfig.onAction(...args),
+              (option) => sendRawMessage(chatJid, `${option.selectedLabel} by ${voterName}`),
+            );
+            if (answered) {
+              log.info('Question answered', { ...answered, voterName });
+              continue; // Don't forward this reply to the agent
             }
 
             // Detect explicit @-mentions of the bot in groups. Detail in

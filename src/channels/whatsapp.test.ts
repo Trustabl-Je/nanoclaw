@@ -11,9 +11,10 @@
  * Both helpers and the mode-resolution truth table are covered below so a
  * future refactor that breaks any part fails this suite.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import {
+  answerPendingQuestion,
   appendMediaFailureNote,
   computeIsMention,
   computeWhatsappDefaults,
@@ -27,6 +28,84 @@ import {
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
 const BOT_LID_USER = '987654321';
+
+describe('answerPendingQuestion', () => {
+  const approve = { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' };
+  const fresh = () => new Map([['chat@g.us', { questionId: 'q1', options: [approve] }]]);
+
+  it('confirms and closes the question only once the host accepts the answer', async () => {
+    const questions = fresh();
+    const confirm = vi.fn(async () => undefined);
+    const onAction = vi.fn(async () => 'accepted' as const);
+    const answered = await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      onAction,
+      confirm,
+    );
+    expect(answered).toEqual({ questionId: 'q1', value: 'approve', outcome: 'accepted' });
+    expect(onAction).toHaveBeenCalledWith('q1', 'approve', 'owner@s.whatsapp.net');
+    expect(confirm).toHaveBeenCalledWith(approve);
+    expect(questions.has('chat@g.us')).toBe(false);
+  });
+
+  it('keeps the question open and posts nothing when the host refuses the answer', async () => {
+    const questions = fresh();
+    const confirm = vi.fn(async () => undefined);
+    const answered = await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'bystander@s.whatsapp.net',
+      async () => 'refused' as const,
+      confirm,
+    );
+    expect(answered?.outcome).toBe('refused');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(questions.has('chat@g.us')).toBe(true);
+  });
+
+  it('closes the question silently when the host decided nothing', async () => {
+    const questions = fresh();
+    const confirm = vi.fn(async () => undefined);
+    await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      async () => 'ignored' as const,
+      confirm,
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(questions.has('chat@g.us')).toBe(false);
+  });
+
+  it('leaves a newer question alone when it replaced this one meanwhile', async () => {
+    const questions = fresh();
+    const newer = { questionId: 'q2', options: [approve] };
+    await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      async () => {
+        questions.set('chat@g.us', newer);
+        return 'ignored' as const;
+      },
+      vi.fn(),
+    );
+    expect(questions.get('chat@g.us')).toBe(newer);
+  });
+
+  it('is not an answer when no question is pending or the command matches no option', async () => {
+    const onAction = vi.fn();
+    expect(await answerPendingQuestion(fresh(), 'chat@g.us', '/later', 'u', onAction, vi.fn())).toBeUndefined();
+    expect(await answerPendingQuestion(new Map(), 'chat@g.us', '/approve', 'u', onAction, vi.fn())).toBeUndefined();
+    expect(onAction).not.toHaveBeenCalled();
+  });
+});
 
 describe('isBotMentionedInGroup (#2560)', () => {
   it('detects the bot phone JID in extendedTextMessage.contextInfo.mentionedJid', () => {

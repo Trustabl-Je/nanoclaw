@@ -459,7 +459,16 @@ function createAdapter(): ChannelAdapter {
         return;
       }
       const selected = render.options[parsed.option]!;
-      setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
+      // The question shows as answered only once the host accepts the answer.
+      const outcome = await setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
+      if (outcome === 'refused') {
+        sendJson(res, 403, { error: 'Only an approver can answer this.' });
+        return;
+      }
+      if (outcome !== 'accepted') {
+        sendJson(res, 409, { error: 'This question is no longer pending.' });
+        return;
+      }
       publish(platformId, {
         type: 'question-resolution',
         questionId: parsed.questionId,

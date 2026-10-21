@@ -303,7 +303,7 @@ function makeFakeSdk(options: { missingReactionTarget?: boolean } = {}) {
   return { sdk, queue, sends, stop, reacted, makeSpace };
 }
 
-function makeHostConfig() {
+function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'ignored'> = []) {
   const inbound: Array<{ platformId: string; msg: InboundMessage }> = [];
   const metadata: Array<{ platformId: string; isGroup?: boolean }> = [];
   const actions: Array<{ questionId: string; option: string; userId: string }> = [];
@@ -315,8 +315,9 @@ function makeHostConfig() {
     onMetadata: (platformId, _name, isGroup) => {
       metadata.push({ platformId, isGroup });
     },
-    onAction: (questionId, option, userId) => {
+    onAction: async (questionId, option, userId) => {
       actions.push({ questionId, option, userId });
+      return outcomes.shift() ?? 'accepted';
     },
   };
   return { config, inbound, metadata, actions };
@@ -618,6 +619,45 @@ describe('photon adapter (mocked SDK)', () => {
     await waitFor(() => host.actions.length === 1);
     expect(host.actions[0]).toEqual({ questionId: 'q1', option: 'Approve', userId: '+15551112222' });
     // The slash reply must NOT have woken the agent as a normal inbound.
+    expect(host.inbound).toHaveLength(0);
+
+    await adapter.teardown();
+  });
+
+  it('confirms an answer only once the host accepts it; a refused one keeps the question open', async () => {
+    const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['refused', 'accepted']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    // Confirmations only (an inbound reply may also send other things, e.g. a read receipt).
+    const confirmations = () =>
+      sends.filter(
+        (s) => String(s.builder.payload).includes('Approve') && !String(s.builder.payload).includes('Ship it?'),
+      );
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string, from: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: from }, content: { type: 'text', text: '/approve' } },
+      ]);
+
+    // The host refuses the first answer (as for someone who can't decide), accepts the second.
+    reply('r1', '+15551112222');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    // Refused: nothing posted, and the approver can still answer.
+    expect(confirmations()).toHaveLength(0);
+
+    reply('r2', '+15551112222');
+    await waitFor(() => host.actions.length === 2);
+    await waitFor(() => confirmations().length === 1);
     expect(host.inbound).toHaveLength(0);
 
     await adapter.teardown();
