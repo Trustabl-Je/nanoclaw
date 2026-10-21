@@ -16,6 +16,7 @@ import {
   LinkButton,
   type CardChild,
   type CardElement,
+  type ActionEvent,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
@@ -494,6 +495,8 @@ const stoppedNotice = (ref: string, posted: number, parts: number) =>
 const OVERFLOW_RESUME_MS = 60 * 60_000;
 /** How long a failed delivery waits for its stopped note before reporting the failure. */
 const STOPPED_NOTE_WAIT_MS = 5_000;
+/** Shown only to a clicker the host refused, where the channel can post privately. */
+const REFUSED_CLICK_NOTE = 'Only an approver can answer this.';
 
 const FENCE = '```';
 /** A fence opens or closes only at the start of a line; backticks mid-line are text. */
@@ -1070,18 +1073,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
         const selectedOption = resolveSelectedOption(render, event.value, tail);
-        // No render: already resolved (a late or repeated click), or a pending row
-        // without stored render metadata. The host decides; the card stays as it is.
-        if (!render || render.deferResolution) {
-          setupConfig.onAction(questionId, selectedOption, userId, {
-            instance: instanceKey,
-            messageId: event.messageId,
-            platformId: adapter.channelIdFromThreadId(event.threadId),
-          });
-          return;
-        }
-        const title = render?.title ?? '❓ Question';
-        const matched = render?.options.find((o) => o.value === selectedOption);
+        const outcome = await setupConfig.onAction(questionId, selectedOption, userId, {
+          instance: instanceKey,
+          messageId: event.messageId,
+          platformId: adapter.channelIdFromThreadId(event.threadId),
+        });
+        if (outcome === 'refused') return tellRefusedClicker(event);
+        // The card shows a decision only once the host accepted it. No render: already
+        // resolved (a late or repeated click), or a pending row without stored render
+        // metadata; deferred: the host updates the card itself.
+        if (outcome !== 'accepted' || !render || render.deferResolution) return;
+        const title = render.title ?? '❓ Question';
+        const matched = render.options.find((o) => o.value === selectedOption);
         const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
 
         // Update the card to show the selected answer, who acted, and remove buttons
@@ -1089,19 +1092,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         try {
           await editClickedCard(event.threadId, event.messageId, questionId, {
             title,
-            question: render?.question ?? '',
+            question: render.question ?? '',
             selectedLabel,
             actorName,
           });
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
-
-        setupConfig.onAction(questionId, selectedOption, userId, {
-          instance: instanceKey,
-          messageId: event.messageId,
-          platformId: adapter.channelIdFromThreadId(event.threadId),
-        });
       });
 
       await chat.initialize();
@@ -1411,6 +1408,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   return bridge;
 }
 
+/** Nothing is posted where the channel has no private message (no DM fallback). */
+async function tellRefusedClicker(event: ActionEvent): Promise<void> {
+  try {
+    await event.thread?.postEphemeral(event.user, REFUSED_CLICK_NOTE, { fallbackToDM: false });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- a failed note leaves the card as it is either way
+  } catch (err) {
+    log.warn('Failed to tell a refused clicker', { err });
+  }
+}
+
 /**
  * Start a local HTTP server to receive forwarded Gateway events.
  * This is needed because the Gateway listener in webhook-forwarding mode
@@ -1512,6 +1519,41 @@ async function handleForwardedEvent(
           log.error('Failed to acknowledge interaction', { err });
         }
       };
+      /** The interaction's webhook (a private follow-up, or the clicked message); a failure never stops the card edit. */
+      const webhook = async (method: 'POST' | 'PATCH', path: string, body: Record<string, unknown>) => {
+        try {
+          const result = await fetch(
+            `https://discord.com/api/v10/webhooks/${interaction.application_id as string}/${interactionToken}${path}`,
+            { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+          );
+          if (!result.ok) log.error('Discord interaction webhook failed', { method, status: result.status });
+          // eslint-disable-next-line no-catch-all/no-catch-all -- the host has decided either way
+        } catch (err) {
+          log.error('Discord interaction webhook failed', { method, err });
+        }
+      };
+      const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
+      /**
+       * Hands the click to the host; its answer is handled in the background so it
+       * can't hold this event. A refused clicker is told privately (flags 64: only
+       * they see it); `onAccepted` runs only once the host accepted the click.
+       */
+      const decide = (questionId: string, value: string, onAccepted?: () => Promise<void>) => {
+        const outcome = setupConfig.onAction(questionId, value, user?.id || '', {
+          messageId,
+          platformId: interaction.channel_id as string | undefined,
+        });
+        void (async () => {
+          try {
+            const result = await outcome;
+            if (result === 'refused') await webhook('POST', '', { content: REFUSED_CLICK_NOTE, flags: 64 });
+            else if (result === 'accepted') await onAccepted?.();
+            // eslint-disable-next-line no-catch-all/no-catch-all -- the host has decided; only the card update failed
+          } catch (err) {
+            log.error('Failed to update interaction', { err });
+          }
+        })();
+      };
 
       // Parse the selected option from custom_id. The adapter writes
       // `${buttonId}\n${value}` (Chat SDK 4.41+); older cards carry the id alone.
@@ -1536,64 +1578,40 @@ async function handleForwardedEvent(
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, encodedValue ?? tail, tail);
-      if (!questionId || !render) {
+      // Ack at once and keep the buttons (DEFERRED_UPDATE_MESSAGE): the card
+      // changes only after the host accepts the click.
+      await ack({ type: 6 });
+      if (!questionId || !render || render.deferResolution) {
         // Not one of our questions, already resolved (a late, repeated or
-        // re-delivered click), or a pending row without stored render metadata:
-        // ack, let the host decide, and leave the card as it is.
-        await ack({ type: 6 });
-        if (questionId && selectedOption) {
-          setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-            messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
-            platformId: interaction.channel_id as string | undefined,
-          });
-        }
+        // re-delivered click), a pending row without stored render metadata,
+        // or a card the host updates itself: let the host decide, leave the card.
+        if (questionId && (selectedOption || render?.deferResolution)) decide(questionId, selectedOption);
         return;
       }
-      if (render?.deferResolution && questionId) {
-        await ack({ type: 6 });
-        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
-          platformId: interaction.channel_id as string | undefined,
-        });
-        return;
-      }
-      const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
-      const matchedOpt = render?.options.find((o) => o.value === selectedOption);
+      const cardTitle = render.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
+      const matchedOpt = render.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
       const actorName = user?.global_name || user?.username || '';
-      const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
-      // Ack and remove the buttons in the same call (UPDATE_MESSAGE with components
-      // only: the embed stays, so no length limit can reject it), before the decision.
-      await ack({ type: 7, data: { components: [] } });
 
-      // Record the decision before any card update, which can fail or stall.
       // An empty value counts when it is a real option's value.
-      if (questionId && (selectedOption || render?.options.some((option) => option.value === selectedOption))) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-          messageId,
-          platformId: interaction.channel_id as string | undefined,
+      if (selectedOption || render.options.some((option) => option.value === selectedOption)) {
+        decide(questionId, selectedOption, async () => {
+          // Remove the buttons first (components only: the embed stays, so no
+          // length limit can reject it), then edit the card text like every
+          // resolved card, escaped and within the limits.
+          await webhook('PATCH', '/messages/@original', { components: [] });
+          if (!messageId) return;
+          const threadId = adapter.encodeThreadId({
+            guildId: (interaction.guild_id as string | undefined) || '@me',
+            channelId: interaction.channel_id as string,
+          });
+          await editClickedCard(threadId, messageId, questionId, {
+            title: cardTitle,
+            question: render.question ?? originalDescription,
+            selectedLabel,
+            actorName,
+          });
         });
-      }
-
-      // Then the card text, in the background so a stalled update can't hold
-      // this event: edited like every resolved card, escaped and within the limits.
-      if (messageId) {
-        void (async () => {
-          try {
-            const threadId = adapter.encodeThreadId({
-              guildId: (interaction.guild_id as string | undefined) || '@me',
-              channelId: interaction.channel_id as string,
-            });
-            await editClickedCard(threadId, messageId, questionId, {
-              title: cardTitle,
-              question: render?.question ?? originalDescription,
-              selectedLabel,
-              actorName,
-            });
-          } catch (err) {
-            log.error('Failed to update interaction', { err });
-          }
-        })();
       }
       return;
     }

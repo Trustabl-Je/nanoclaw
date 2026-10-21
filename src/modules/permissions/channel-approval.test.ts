@@ -584,24 +584,22 @@ describe('unknown-channel registration flow', () => {
 
   it('rejects clicks from an unauthorized user (prevents self-admit via forwarded card)', async () => {
     const { routeInbound } = await import('../../router.js');
-    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
 
     await expectAsyncDelivery(() => routeInbound(groupMention('chat-unauth')));
     const pending = (await getDb().get<{ messaging_group_id: string }>(
       'SELECT messaging_group_id FROM pending_channel_approvals',
     ))!;
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'approve',
-        userId: 'random-bystander',
-        channelType: 'telegram',
-        platformId: 'dm-random',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'approve',
+      userId: 'random-bystander',
+      channelType: 'telegram',
+      platformId: 'dm-random',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     // No wiring created, pending row preserved so a real approver can act on it.
     const mgaCount = await countRows(
@@ -678,17 +676,16 @@ describe('unknown-channel registration flow', () => {
     expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
     expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'connect:ag-2',
-        userId: 'scoped-admin',
-        channelType: 'telegram',
-        platformId: 'dm-scoped-admin',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'connect:ag-2',
+      userId: 'scoped-admin',
+      channelType: 'telegram',
+      platformId: 'dm-scoped-admin',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     const mgaCount = await countRows(
       'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',

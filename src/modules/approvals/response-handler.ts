@@ -20,7 +20,7 @@ import {
   getSession,
   transitionPendingApprovalStatus,
 } from '../../db/sessions.js';
-import type { ResponsePayload } from '../../response-registry.js';
+import type { ResponseOutcome, ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
@@ -29,7 +29,7 @@ import { finalizeReject } from './finalize.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
-export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
+export async function handleApprovalsResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   const approval = await getPendingApproval(payload.questionId);
   if (!approval) return false;
 
@@ -40,43 +40,43 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
       userId: payload.userId,
       channelType: payload.channelType,
     });
-    return true;
+    return 'refused';
   }
 
-  await handleRegisteredApproval(approval, payload.value, namespacedUserId(payload) ?? '');
-  return true;
+  return handleRegisteredApproval(approval, payload.value, namespacedUserId(payload) ?? '', payload.accepted);
 }
 
 async function handleRegisteredApproval(
   approval: PendingApproval,
   selectedOption: string,
   userId: string,
-): Promise<void> {
+  accepted?: () => void,
+): Promise<ResponseOutcome> {
   if (!approval.session_id) {
     await deletePendingApproval(approval.approval_id);
-    return;
+    return 'ignored';
   }
   const session = await getSession(approval.session_id);
   if (!session) {
     await deletePendingApproval(approval.approval_id);
-    return;
+    return 'ignored';
   }
 
   // "Reject with reason…" — hold the row and capture the admin's next DM
   // instead of finalizing now. The agent is notified exactly once: after the
   // reason arrives, or after the sweep's timeout if the admin ghosts.
   if (selectedOption === REJECT_WITH_REASON_VALUE) {
-    await armReasonCapture(approval, session, userId);
-    return;
+    return (await armReasonCapture(approval, session, userId)) ? 'accepted' : 'ignored';
   }
 
   // Plain Reject (or any other non-approve value) — instant fast path.
   if (selectedOption !== 'approve') {
-    await finalizeReject(approval, session, userId);
-    return;
+    return (await finalizeReject(approval, session, userId)) ? 'accepted' : 'ignored';
   }
 
-  if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'approved'))) return;
+  if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'approved'))) return 'ignored';
+  // The decision is recorded: the card can show it while the action runs.
+  accepted?.();
 
   // Approved — dispatch to the module that registered for this action.
   const notify = (text: string): Promise<void> =>
@@ -100,7 +100,7 @@ async function handleRegisteredApproval(
     await deletePendingApproval(approval.approval_id);
     await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
     await requestWake(session, 'approval-response');
-    return;
+    return 'accepted';
   }
 
   const payload = JSON.parse(approval.payload);
@@ -117,6 +117,7 @@ async function handleRegisteredApproval(
   await deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await requestWake(session, 'approval-response');
+  return 'accepted';
 }
 
 export function namespacedUserId(payload: ResponsePayload): string | null {

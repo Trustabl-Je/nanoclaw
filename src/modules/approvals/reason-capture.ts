@@ -82,10 +82,11 @@ function extractText(event: InboundEvent): string {
  * finalize outright. Prompts the admin's DM, then parks the row and arms
  * capture. If we can't reach the admin (no DM, no adapter, delivery throws) we
  * finalize a plain reject immediately rather than strand the requesting agent.
+ * Returns false when another response already claimed the row.
  */
-export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<void> {
+export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<boolean> {
   const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
-  if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return;
+  if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return false;
 
   const channelType = approval.channel_type;
   const platformId = approval.platform_id;
@@ -99,7 +100,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       hasAdapter: Boolean(adapter),
     });
     await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
-    return;
+    return true;
   }
 
   try {
@@ -120,13 +121,14 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       err,
     });
     await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
-    return;
+    return true;
   }
 
   // Prompt is out — now hold the row and arm capture. Order matters: a reply
   // can't arrive before the prompt is read, so there's no lost-message window.
   awaitingReason.set(dmKey(channelType, platformId, instance), { approvalId: approval.approval_id, userId });
   log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
+  return true;
 }
 
 /**
