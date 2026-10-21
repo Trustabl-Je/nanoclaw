@@ -944,10 +944,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     let shown: Awaited<ReturnType<NonNullable<QuestionRender['afterClick']>>>;
     try {
-      shown = await render?.afterClick?.({ outcome, selectedOption, userId: click.userId });
+      shown = await render?.afterClick?.({
+        outcome,
+        selectedOption,
+        userId: click.userId,
+        actorName: click.actorName,
+        messageId: click.address.messageId,
+        platformId: click.address.platformId,
+        threadId: click.address.threadId,
+      });
       // eslint-disable-next-line no-catch-all/no-catch-all -- a failing hook falls back to the default display
-    } catch (err) {
-      log.warn('Question afterClick hook failed', { questionId: click.questionId, err });
+    } catch {
+      log.warn('Question afterClick hook failed', { code: 'after_click_failed' });
     }
     try {
       if (shown) {
@@ -976,8 +984,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         actorName: outcome === 'closed' ? '' : click.actorName,
       });
       // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
-    } catch (err) {
-      log.warn('Failed to update card after action', { questionId: click.questionId, err });
+    } catch {
+      log.warn('Failed to update card after action', { code: 'platform_edit_failed' });
     }
   };
 
@@ -1200,7 +1208,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             actorName: event.user?.userName || event.user?.fullName || '',
             messageId,
             threadId: event.threadId,
-            address: { instance: instanceKey, messageId, platformId: adapter.channelIdFromThreadId(event.threadId) },
+            address: {
+              instance: instanceKey,
+              messageId,
+              platformId: adapter.channelIdFromThreadId(event.threadId),
+              threadId: event.threadId,
+            },
           },
           { notePrivately: (text) => tellPrivately(event, text) },
         );
@@ -1544,7 +1557,7 @@ interface CardClick {
   /** The clicked card's message, when the transport knows it. */
   messageId: string | undefined;
   threadId: string;
-  address: { instance?: string; messageId?: string; platformId?: string };
+  address: { instance?: string; messageId?: string; platformId?: string; threadId?: string | null };
   /** Card text to keep when the render has none (Discord: the original embed's). */
   fallbackQuestion?: string;
 }
@@ -1679,6 +1692,11 @@ async function handleForwardedEvent(
       // changes only after the host accepts the click.
       await ack({ type: 6 });
       if (!questionId) return;
+      // The encoded channel, as every other click and the card's messaging group carry it.
+      const threadId = adapter.encodeThreadId({
+        guildId: (interaction.guild_id as string | undefined) || '@me',
+        channelId: interaction.channel_id as string,
+      });
 
       // The rest runs in the background: Discord forwards a channel's events in
       // order, so neither an earlier click on this card nor the host may hold them.
@@ -1692,11 +1710,8 @@ async function handleForwardedEvent(
             userId: user?.id || '',
             actorName: user?.global_name || user?.username || '',
             messageId,
-            threadId: adapter.encodeThreadId({
-              guildId: (interaction.guild_id as string | undefined) || '@me',
-              channelId: interaction.channel_id as string,
-            }),
-            address: { messageId, platformId: interaction.channel_id as string | undefined },
+            threadId,
+            address: { messageId, platformId: adapter.channelIdFromThreadId(threadId), threadId },
             fallbackQuestion: originalDescription,
           },
           {

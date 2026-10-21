@@ -50,6 +50,14 @@ describe('dispatchResponse', () => {
     finish();
   });
 
+  it('counts a handler that still returns true (written before outcomes) as accepted', async () => {
+    const { dispatchResponse, registerResponseHandler } = await freshRegistry();
+    const legacy = async (): Promise<boolean> => true;
+    registerResponseHandler(legacy);
+
+    expect(await dispatchResponse(click)).toBe('accepted');
+  });
+
   it('treats an unowned or failed click as ignored', async () => {
     const { dispatchResponse, registerResponseHandler } = await freshRegistry();
     expect(await dispatchResponse(click)).toBe('ignored');
