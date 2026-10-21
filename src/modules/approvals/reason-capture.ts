@@ -122,7 +122,9 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       instance,
     );
   } catch (err) {
-    if (awaitingReason.get(key) === arming) awaitingReason.delete(key);
+    // A reason caught meanwhile (the capture took the arming) wins over the plain reject.
+    if (awaitingReason.get(key) !== arming) return true;
+    awaitingReason.delete(key);
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
       err,
