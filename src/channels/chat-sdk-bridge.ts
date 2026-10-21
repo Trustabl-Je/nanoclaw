@@ -1698,10 +1698,14 @@ async function handleForwardedEvent(
       // changes only after the host accepts the click.
       await ack({ type: 6 });
       if (!questionId) return;
-      // The encoded channel, as every other click and the card's messaging group carry it.
+      // Encoded as the adapter encodes a click (a thread by its parent channel and
+      // itself), as every other click and the card's messaging group carry it.
+      const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
+      const inThread = (channel?.type === 11 || channel?.type === 12) && channel.parent_id; // public, private thread
       const threadId = adapter.encodeThreadId({
         guildId: (interaction.guild_id as string | undefined) || '@me',
-        channelId: interaction.channel_id as string,
+        channelId: inThread ? channel.parent_id! : (interaction.channel_id as string),
+        ...(inThread ? { threadId: interaction.channel_id as string } : {}),
       });
 
       // The rest runs in the background: Discord forwards a channel's events in
