@@ -104,6 +104,11 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
     return true;
   }
 
+  // Armed before the prompt goes out: a reason typed as soon as the prompt shows,
+  // before its delivery returns, is still caught.
+  const key = dmKey(channelType, platformId, instance);
+  const arming = { approvalId: approval.approval_id, userId };
+  awaitingReason.set(key, arming);
   try {
     // The prompt follows the card: same thread when the card sits in the requester's chat.
     const cardChat = await getMessagingGroupByPlatform(channelType, platformId, instance);
@@ -117,6 +122,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       instance,
     );
   } catch (err) {
+    if (awaitingReason.get(key) === arming) awaitingReason.delete(key);
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
       err,
@@ -125,9 +131,6 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
     return true;
   }
 
-  // Prompt is out — now hold the row and arm capture. Order matters: a reply
-  // can't arrive before the prompt is read, so there's no lost-message window.
-  awaitingReason.set(dmKey(channelType, platformId, instance), { approvalId: approval.approval_id, userId });
   log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
   return true;
 }

@@ -63,11 +63,12 @@ describe('question answers', () => {
     expect(writeSessionMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('puts the question back when the answer could not be written, so it can be answered again', async () => {
+  it('closes a question whose answer could not be written, without bringing it back for a second answer', async () => {
     vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
-    expect(await answer('a')).toBe('ignored');
-    expect(await answer('a')).toBe('accepted');
-    expect(writeSessionMessage).toHaveBeenCalledTimes(2);
+    // The write may have half-committed: the question isn't revived, so no second answer can follow.
+    expect(await answer('a')).toBe('closed');
+    expect(await answer('b')).toBe('ignored');
+    expect(writeSessionMessage).toHaveBeenCalledTimes(1);
   });
 
   it('reports the answer accepted before the agent is woken', async () => {
