@@ -77,17 +77,27 @@ export async function updatePendingChannelApprovalCard(
  * Names the card the question lives on, unless another card was named since:
  * `from` is what the column must still hold (NULL for the first card, '' for
  * a card on its way), so a slow delivery result can't replace a newer card.
+ * The first card is named only while the question still holds its options.
  */
 export async function setPendingChannelApprovalCardMessage(
   messagingGroupId: string,
   messageId: string | null,
-  from: null | '',
+  from: { first: string } | '',
 ): Promise<void> {
+  if (from === '') {
+    await getDb().run(
+      `UPDATE pending_channel_approvals SET card_message_id = ? WHERE messaging_group_id = ? AND card_message_id = ''`,
+      messageId,
+      messagingGroupId,
+    );
+    return;
+  }
   await getDb().run(
     `UPDATE pending_channel_approvals SET card_message_id = ?
-       WHERE messaging_group_id = ? AND ${from === null ? 'card_message_id IS NULL' : "card_message_id = ''"}`,
+       WHERE messaging_group_id = ? AND card_message_id IS NULL AND options_json = ?`,
     messageId,
     messagingGroupId,
+    from.first,
   );
 }
 
