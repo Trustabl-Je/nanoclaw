@@ -384,7 +384,9 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
       undefined,
       delivery.messagingGroup.instance,
     );
-    if (cardId) await setPendingChannelApprovalCardMessage(messagingGroupId, cardId, null);
+    if (cardId) {
+      await setPendingChannelApprovalCardMessage(messagingGroupId, cardId, { first: JSON.stringify(options) });
+    }
     log.info('Channel registration card delivered', {
       messagingGroupId,
       agentGroupCount: agentGroups.length,

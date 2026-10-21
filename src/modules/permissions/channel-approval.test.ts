@@ -715,6 +715,30 @@ describe('unknown-channel registration flow', () => {
     expect(after).toEqual({ options_json: before.options_json, card_message_id: 'card-1' });
   });
 
+  it('a slow first-card id is not recorded once the question has moved to the agent choice', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    let postFirst!: (id: string) => void;
+    deliverMock.mockImplementationOnce(() => new Promise((resolve) => (postFirst = resolve)));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-slow-first-unnamed')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    // The choice card comes back with no id, so the question stays unchecked.
+    deliverMock.mockResolvedValueOnce(undefined);
+    expect(await dispatchResponse({ ...payload, value: 'choose_existing', messageId: 'card-1' })).toBe('accepted');
+    postFirst('card-1');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const row = (await getDb().get<{ card_message_id: string | null }>(
+      'SELECT card_message_id FROM pending_channel_approvals WHERE messaging_group_id = ?',
+      questionId,
+    ))!;
+    // Recording card-1 now would pair the first card with the agent list.
+    expect(row.card_message_id).toBeNull();
+  });
+
   it("a slow first-card delivery result doesn't replace the agent-choice card bound since", async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');
