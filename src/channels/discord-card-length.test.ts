@@ -28,14 +28,16 @@ vi.mock('../env.js', () => ({
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { fitsDiscordEmbed } from './discord.js';
+import { clearButtonsOnCardEdits, fitsDiscordEmbed } from './discord.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
+const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
 
 vi.stubGlobal(
   'fetch',
-  vi.fn(async (_url: string, init: { body?: string }) => {
-    posts.push(JSON.parse(init.body!));
+  vi.fn(async (url: string, init: { method?: string; body?: string }) => {
+    if (init.method === 'PATCH') patches.push({ url, body: JSON.parse(init.body!) });
+    else posts.push(JSON.parse(init.body!));
     return new Response(JSON.stringify({ id: `m${posts.length}`, channel_id: 'c1' }), { status: 200 });
   }),
 );
@@ -46,6 +48,7 @@ afterAll(() => {
 
 beforeEach(() => {
   posts.length = 0;
+  patches.length = 0;
 });
 
 const adapter = createDiscordAdapter({
@@ -161,5 +164,47 @@ describe('Discord approval cards through the bridge', () => {
   it('posts nothing when the request needs more parts than a card may have', async () => {
     await expect(ask('Approve', 'x'.repeat(100000))).rejects.toBeInstanceOf(CardTooLongError);
     expect(posts).toHaveLength(0);
+  });
+});
+
+describe('clearButtonsOnCardEdits', () => {
+  const resolved = Card({ title: 'Approve', children: [CardText('Approved by admin', { style: 'muted' })] });
+
+  it('shows the gap: the adapter edits a card without actions and sends no components', async () => {
+    await adapter.editMessage('discord:g1:c1', 'm9', { card: resolved });
+    expect(patches[0].body).not.toHaveProperty('components');
+  });
+
+  it('sends components: [] when a message is edited into a card without actions', async () => {
+    const wrapped = createDiscordAdapter({
+      botToken: 'test-bot-token',
+      publicKey: 'a'.repeat(64),
+      applicationId: 'test-app-id',
+    });
+    clearButtonsOnCardEdits(wrapped);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: resolved });
+    expect(patches[0].url).toMatch(/\/channels\/c1\/messages\/m9$/);
+    expect(patches[0].body.components).toEqual([]);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: card(['Approve?']) });
+    expect((patches[1].body.components as unknown[]).length).toBeGreaterThan(0);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { markdown: 'plain text' });
+    expect(patches[2].body).not.toHaveProperty('components');
+  });
+
+  it('is wired into the Discord bridge: a resolved approval card loses its buttons', async () => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.deliver('discord:g1:c1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm9',
+        terminalCard: { title: 'Approve', question: 'Run it?', resolution: 'Approved by admin' },
+      },
+    });
+    expect(patches).toHaveLength(1);
+    expect(patches[0].body.components).toEqual([]);
   });
 });

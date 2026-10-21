@@ -90,6 +90,28 @@ export function unwrapForwards(adapter: ReturnType<typeof createDiscordAdapter>)
   };
 }
 
+/**
+ * Discord keeps a message's buttons on an edit that sends no components, and
+ * the adapter sends none for a card without actions. So an edit of a message
+ * into such a card, like a resolved approval, also sends `components: []`.
+ */
+export function clearButtonsOnCardEdits(adapter: ReturnType<typeof createDiscordAdapter>): void {
+  const a = adapter as unknown as {
+    discordFetch: (path: string, method: string, body?: unknown) => Promise<Response>;
+  };
+  const discordFetch = a.discordFetch.bind(adapter);
+  a.discordFetch = (path, method, body) => {
+    const cardEdit =
+      method === 'PATCH' &&
+      /^\/channels\/[^/]+\/messages\/[^/]+$/.test(path) &&
+      typeof body === 'object' &&
+      body !== null &&
+      'embeds' in body &&
+      !('components' in body);
+    return discordFetch(path, method, cardEdit ? { ...body, components: [] } : body);
+  };
+}
+
 registerChannelAdapter('discord', {
   factory: () => {
     const env = readEnvFile(['DISCORD_BOT_TOKEN', 'DISCORD_PUBLIC_KEY', 'DISCORD_APPLICATION_ID']);
@@ -100,6 +122,7 @@ registerChannelAdapter('discord', {
       applicationId: env.DISCORD_APPLICATION_ID,
     });
     unwrapForwards(discordAdapter);
+    clearButtonsOnCardEdits(discordAdapter);
     return createChatSdkBridge({
       adapter: discordAdapter,
       concurrency: 'concurrent',
