@@ -1039,6 +1039,91 @@ describe('unknown-channel registration flow', () => {
     expect(notes.some((note) => note.includes('check the host logs'))).toBe(false);
   });
 
+  it("a connect whose replayed message is the approver's own reply doesn't hang on its own turn", async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    // A registration whose stored message is the owner's own, in the DM the name prompt goes to:
+    // the replay after a connect reaches the armed name prompt.
+    const { createPendingChannelApproval } = await import('./db/pending-channel-approvals.js');
+    const questionId = 'mg-dm-owner';
+    await createPendingChannelApproval({
+      messaging_group_id: questionId,
+      agent_group_id: 'ag-1',
+      original_message: JSON.stringify({
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        message: {
+          id: 'own-dm-1',
+          kind: 'chat',
+          content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'hello' }),
+          timestamp: now(),
+        },
+      }),
+      approver_user_id: 'telegram:owner',
+      created_at: now(),
+      title: 'Connect?',
+      question: 'Q',
+      options_json: JSON.stringify([]),
+    });
+    void routeInbound;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    expect(await dispatchResponse({ ...payload, value: 'new_agent' })).toBe('accepted');
+    // The handler itself (not the early outcome) must finish: it returns only after the replay.
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const handled = (async () => {
+      for (const handler of getResponseHandlers()) {
+        const outcome = await handler({ ...payload, value: 'connect:ag-1' });
+        if (outcome) return outcome;
+      }
+      return false;
+    })();
+    const finished = await Promise.race([handled, new Promise((resolve) => setTimeout(() => resolve('hung'), 2000))]);
+    expect(finished).toBe('accepted');
+  });
+
+  it('a connect to an agent deleted meanwhile takes its turn too: no agent is left unconnected', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-gone-target')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    expect(await dispatchResponse({ ...payload, value: 'new_agent' })).toBe('accepted');
+    deliverMock.mockClear();
+
+    await Promise.all([
+      routeInbound({
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        message: {
+          id: 'name-gone-1',
+          kind: 'chat' as const,
+          content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Orphan' }),
+          timestamp: now(),
+        },
+      }),
+      dispatchResponse({ ...payload, value: 'connect:ag-deleted' }),
+    ]);
+
+    const orphan = await getDb().get<{ id: string }>("SELECT id FROM agent_groups WHERE name = 'Orphan'");
+    if (orphan) {
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
+          questionId,
+          orphan.id,
+        ),
+      ).toBe(1);
+    }
+    const notes = deliverMock.mock.calls.map((call) => String(call[4]));
+    expect(notes.some((note) => note.includes('already been connected another way'))).toBe(false);
+  });
+
   it('a name reply after the registration vanished is consumed without creating anything', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');

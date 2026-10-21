@@ -368,7 +368,8 @@ setChannelRequestGate(async (mg, event) => {
 });
 
 /**
- * Wire an approved channel to an agent group and replay the stored event.
+ * Wire an approved channel to an agent group; the caller then replays the stored
+ * event with replayRegisteredMessage, outside the registration's turn.
  * Shared by both approve paths (connect-existing button, free-text new-agent
  * name reply) so they produce identical wirings. Returns 'accepted' when this
  * call claimed the request and created the wiring, 'ignored' when another
@@ -462,16 +463,23 @@ async function wireApprovedChannel(
     engageMode: engage.engage_mode,
     approverId,
   });
+  return 'accepted';
+}
 
+/**
+ * Replays the message that asked for the channel, once it is wired. Callers run
+ * it after the registration's turn: the replay can reach this registration's own
+ * name prompt, which waits for that turn.
+ */
+async function replayRegisteredMessage(row: PendingChannelApproval): Promise<void> {
   try {
-    await routeInbound(event);
+    await routeInbound(JSON.parse(row.original_message) as InboundEvent);
   } catch (err) {
     log.error('Failed to replay message after channel approval', {
       messagingGroupId: row.messaging_group_id,
       err,
     });
   }
-  return 'accepted';
 }
 
 /**
@@ -657,8 +665,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         targetAgentGroupId,
       });
-      await deletePendingChannelApproval(row.messaging_group_id);
-      return 'closed';
+      // In the registration's turn, like every removal: a name reply may be creating meanwhile.
+      const removed = await onRegistration(row.messaging_group_id, () =>
+        deletePendingChannelApproval(row.messaging_group_id),
+      );
+      return removed ? 'closed' : 'ignored';
     }
     if (!(await hasAdminPrivilege(approverId, targetAgentGroupId))) {
       log.warn('Channel registration: target agent group rejected for unauthorized approver', {
@@ -678,9 +689,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Wire + replay (shared path for connect and create) ──
   // A failed wiring drops the row (closed); another choice may have won (ignored).
-  return onRegistration(row.messaging_group_id, () =>
+  const wired = await onRegistration(row.messaging_group_id, () =>
     wireApprovedChannel(row, targetAgentGroupId, approverId, payload.accepted),
   );
+  if (wired === 'accepted') await replayRegisteredMessage(row);
+  return wired;
 }
 
 registerResponseHandler(handleChannelApprovalResponse);
@@ -740,6 +753,7 @@ async function createFromNameReply(
     });
     return { row, ag: created, wired: await wireApprovedChannel(row, created.id, userId) };
   });
+  if (turn && 'wired' in turn && turn.wired === 'accepted') await replayRegisteredMessage(turn.row);
   if (!turn) return true;
   const { row } = turn;
 
