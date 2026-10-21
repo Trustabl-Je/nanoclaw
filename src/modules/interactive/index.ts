@@ -11,7 +11,7 @@
  * modularizing it adds more registry surface than it saves.
  */
 import { getDb, hasTable } from '../../db/connection.js';
-import { createPendingQuestion, deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
+import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
@@ -47,11 +47,12 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
         userId: payload.userId ?? '',
       }),
     });
-    // eslint-disable-next-line no-catch-all/no-catch-all -- rethrown once the question is back
+    // eslint-disable-next-line no-catch-all/no-catch-all -- logged; the question is closed either way
   } catch (err) {
-    // Not delivered: put the question back so it can be answered again.
-    await createPendingQuestion(pq);
-    throw err;
+    // The write may have half-committed, so the question isn't brought back for a
+    // second answer: it is closed, and the lost answer logged.
+    log.error('Question answer could not be written to the agent', { questionId: payload.questionId, err });
+    return 'closed';
   }
   // Delivered: the card can show the answer while the agent wakes.
   payload.accepted?.();

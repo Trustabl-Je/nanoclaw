@@ -236,6 +236,28 @@ describe('reject with reason', () => {
     expect(await outcome).toBe('accepted');
   });
 
+  it('captures a reason typed while the prompt is still being delivered', async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-early-reason', 'install_packages');
+    let posted!: () => void;
+    deliverHold = new Promise<void>((resolve) => (posted = resolve));
+    const outcome = handleApprovalsResponse({
+      questionId: 'appr-early-reason',
+      value: REJECT_WITH_REASON_VALUE,
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The prompt is visible but its delivery hasn't returned yet.
+    expect(await captureReasonReply(dmReply('typed fast'))).toBe(true);
+    posted();
+    await outcome;
+    expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "typed fast"');
+  });
+
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
     const { captureReasonReply } = await import('./reason-capture.js');
     await seedApproval('appr-3');
