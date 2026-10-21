@@ -2032,6 +2032,34 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     }
   });
 
+  it("a click released by the hold cap never draws over a later click's decision", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let releaseFirst!: () => void;
+    const afterClick = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (releaseFirst = () => resolve({ card: { markdown: 'Still waiting' } }))),
+      )
+      .mockResolvedValueOnce(undefined);
+    const { bridge, click, onAction, editMessage } = await startClicks('q-hold-cap', { ...review, afterClick });
+    onAction.mockResolvedValueOnce('refused').mockResolvedValueOnce('accepted');
+    try {
+      const first = click('bystander', 'Bob');
+      await vi.waitFor(() => expect(afterClick).toHaveBeenCalledTimes(1));
+      const second = click('approver', 'Ann');
+      // The first click stalls past the hold cap: the second one goes ahead and draws.
+      await vi.advanceTimersByTimeAsync(10_001);
+      await second;
+      expect(JSON.stringify(editMessage.mock.calls.at(-1))).toContain('✅ Approved by Ann');
+      releaseFirst();
+      await first;
+      expect(JSON.stringify(editMessage.mock.calls)).not.toContain('Still waiting');
+    } finally {
+      vi.useRealTimers();
+      await bridge.teardown();
+    }
+  });
+
   it('posts nothing for a refused click where the channel has no private messages', async () => {
     const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-no-private', review);
     onAction.mockResolvedValue('refused');
