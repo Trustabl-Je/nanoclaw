@@ -29,10 +29,12 @@ export interface ResponsePayload {
 
 /**
  * What a click did. A card shows a resolution only for 'accepted'. 'refused':
- * the clicker may not answer it, so it keeps its buttons. 'ignored': nothing
- * was decided (already resolved, expired, not ours).
+ * the clicker may not answer it, so it keeps its buttons. 'closed': the request
+ * is gone (its session, event or target vanished), so the card says it is no
+ * longer available. 'ignored': nothing was decided (already resolved, expired,
+ * not ours).
  */
-export type ResponseOutcome = 'accepted' | 'refused' | 'ignored';
+export type ResponseOutcome = 'accepted' | 'refused' | 'closed' | 'ignored';
 
 /** Returns the click's outcome when the handler owns it, else false to pass it on. */
 export type ResponseHandler = (payload: ResponsePayload) => Promise<ResponseOutcome | false>;

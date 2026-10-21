@@ -625,6 +625,71 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(1);
   });
 
+  it('counts only the card the registration points at: an old card or a copy is ignored after the agent choice', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    deliverMock.mockResolvedValueOnce('card-1');
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-live-card')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const click = (value: string, messageId: string) =>
+      dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        messageId,
+      });
+
+    deliverMock.mockResolvedValueOnce('card-2');
+    expect(await click('choose_existing', 'card-1')).toBe('accepted');
+
+    // The question now holds the agent list: index 0 of the old card, or of a copy, resolves to "connect".
+    expect(await click('connect:ag-1', 'card-1')).toBe('ignored');
+    expect(await click('connect:ag-1', 'card-1-copy')).toBe('ignored');
+    const wired = () =>
+      countRows('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?', questionId);
+    expect(await wired()).toBe(0);
+
+    expect(await click('connect:ag-1', 'card-2')).toBe('accepted');
+    expect(await wired()).toBe(1);
+  });
+
+  it('counts no card while the agent-choice card is on its way or failed to arrive', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    deliverMock.mockResolvedValueOnce('card-1');
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-card-on-its-way')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    deliverMock.mockRejectedValueOnce(new Error('response lost'));
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    expect(await dispatchResponse({ ...payload, value: 'choose_existing', messageId: 'card-1' })).toBe('accepted');
+    expect(await dispatchResponse({ ...payload, value: 'connect:ag-1', messageId: 'card-1' })).toBe('ignored');
+  });
+
+  it('checks no card when none was recorded, or the click names none', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    // An adapter that returns no message id (or a row from before the column).
+    deliverMock.mockResolvedValueOnce(undefined);
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-no-card-id')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    expect(await dispatchResponse({ ...payload, value: 'choose_existing', messageId: 'any-card' })).toBe('accepted');
+    // A text-command answer names no card.
+    expect(await dispatchResponse({ ...payload, value: 'connect:ag-1' })).toBe('accepted');
+  });
+
   it('a failed agent-choice delivery keeps the new options: the choice card may have arrived', async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');
@@ -653,32 +718,6 @@ describe('unknown-channel registration flow', () => {
     ))!;
     expect(after.options_json).not.toBe(before.options_json);
     expect(after.options_json).toContain('connect:ag-1');
-  });
-
-  it('reports the agent choice accepted while its card is still being delivered', async () => {
-    const { routeInbound } = await import('../../router.js');
-    const { dispatchResponse } = await import('../../response-registry.js');
-
-    await expectAsyncDelivery(() => routeInbound(groupMention('chat-choice-early')));
-    const before = (await getDb().get<{ messaging_group_id: string; options_json: string }>(
-      'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
-    ))!;
-
-    let release!: () => void;
-    deliverMock.mockImplementationOnce(() => new Promise((resolve) => (release = () => resolve('plat-msg-2'))));
-    const outcome = await dispatchResponse({
-      questionId: before.messaging_group_id,
-      value: 'choose_existing',
-      userId: 'owner',
-      channelType: 'telegram',
-      platformId: 'dm-owner',
-      threadId: null,
-    });
-
-    // Known while the choice card is still being delivered (a restart there must not leave the first card open).
-    expect(outcome).toBe('accepted');
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-    release();
   });
 
   it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
