@@ -73,14 +73,34 @@ export async function updatePendingChannelApprovalCard(
   );
 }
 
+/**
+ * Names the card the question lives on, unless another card was named since:
+ * `from` is what the column must still hold (NULL for the first card, '' for
+ * a card on its way), so a slow delivery result can't replace a newer card.
+ */
 export async function setPendingChannelApprovalCardMessage(
   messagingGroupId: string,
   messageId: string | null,
+  from: null | '',
 ): Promise<void> {
   await getDb().run(
-    'UPDATE pending_channel_approvals SET card_message_id = ? WHERE messaging_group_id = ?',
+    `UPDATE pending_channel_approvals SET card_message_id = ?
+       WHERE messaging_group_id = ? AND ${from === null ? 'card_message_id IS NULL' : "card_message_id = ''"}`,
     messageId,
     messagingGroupId,
+  );
+}
+
+/** Puts the question back on its previous card, while its next card is still on its way. */
+export async function restorePendingChannelApprovalCard(row: PendingChannelApproval): Promise<void> {
+  await getDb().run(
+    `UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ?, card_message_id = ?
+       WHERE messaging_group_id = ? AND card_message_id = ''`,
+    row.title,
+    row.question,
+    row.options_json,
+    row.card_message_id ?? null,
+    row.messaging_group_id,
   );
 }
 
