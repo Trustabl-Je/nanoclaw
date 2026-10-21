@@ -83,7 +83,8 @@ function run(m: Machine): { rc: number; out: string; sudo: string[] } {
 
 const needsPassword = { cached: false, validates: true };
 
-describe('sudo pre-flight (nanoclaw.sh)', () => {
+// Each case spawns bash, sometimes twice; the default 5 s is tight on a loaded runner.
+describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
   it('asks for the password in the open when Node and Docker are missing', () => {
     const r = run({ sudo: needsPassword, interactive: true });
     expect(r.rc).toBe(0);
