@@ -29,7 +29,7 @@ import {
   type AccessGateResult,
 } from '../../router.js';
 import type { InboundEvent } from '../../channels/adapter.js';
-import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
+import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
@@ -268,7 +268,7 @@ setSenderScopeGate(
  * Deny: delete the row (no "deny list" — a future message re-triggers a
  * fresh card per ACTION-ITEMS item 5 "no denial persistence").
  */
-async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   const row = await getPendingSenderApproval(payload.questionId);
   if (!row) return false;
 
@@ -290,7 +290,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
       clickerId,
       expectedApprover: row.approver_user_id,
     });
-    return true; // claim the response so it's not unclaimed-logged, but do nothing
+    return 'refused'; // the card keeps its buttons for a real approver
   }
   const approverId = clickerId;
   const approved = payload.value === 'approve';
@@ -319,7 +319,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
     } catch (err) {
       log.error('Failed to replay message after sender approval', { approvalId: row.id, err });
     }
-    return true;
+    return 'accepted';
   }
 
   log.info('Unknown sender denied', {
@@ -329,7 +329,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
     approverId,
   });
   await deletePendingSenderApproval(row.id);
-  return true;
+  return 'accepted';
 }
 
 registerResponseHandler(handleSenderApprovalResponse);
@@ -452,7 +452,7 @@ async function wireApprovedChannel(
  *                     captures the reply and creates immediately)
  *   reject          — set denied_at, delete pending row
  */
-async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   const row = await getPendingChannelApproval(payload.questionId);
   if (!row) return false;
 
@@ -474,7 +474,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       expectedApprover: row.approver_user_id,
       reason: decision.reason,
     });
-    return true;
+    return 'refused';
   }
   const approverId = clickerId;
 
@@ -486,7 +486,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       messagingGroupId: row.messaging_group_id,
       approverId,
     });
-    return true;
+    return 'accepted';
   }
 
   // ── Choose existing agent — send agent-selection follow-up card ──
@@ -500,11 +500,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         approverUserId: row.approver_user_id,
       });
-      return true;
+      return 'ignored';
     }
 
     const adapter = getDeliveryAdapter();
-    if (!adapter) return true;
+    if (!adapter) return 'ignored';
 
     const agentGroups = await getAllAgentGroups();
     const options = await buildAgentSelectionOptions(agentGroups, approverId);
@@ -534,7 +534,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         err,
       });
     }
-    return true;
+    return 'accepted';
   }
 
   // ── Create new agent — prompt for free-text name ──
@@ -548,7 +548,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         approverUserId: row.approver_user_id,
       });
-      return true;
+      return 'ignored';
     }
 
     const adapter = getDeliveryAdapter();
@@ -556,7 +556,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       log.error('Channel registration: no delivery adapter for name prompt', {
         messagingGroupId: row.messaging_group_id,
       });
-      return true;
+      return 'ignored';
     }
     const prompt = {
       channelMgId: row.messaging_group_id,
@@ -583,8 +583,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       });
       // A newer prompt (a refused name's re-arm, or another channel's) may have replaced this one.
       if (awaitingNameInput.get(row.approver_user_id) === prompt) awaitingNameInput.delete(row.approver_user_id);
+      return 'ignored';
     }
-    return true;
+    return 'accepted';
   }
 
   // ── Resolve target agent group (connect to existing or create new) ──
@@ -599,7 +600,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
       });
       await deletePendingChannelApproval(row.messaging_group_id);
-      return true;
+      return 'ignored';
     }
     if (!(await hasAdminPrivilege(approverId, targetAgentGroupId))) {
       log.warn('Channel registration: target agent group rejected for unauthorized approver', {
@@ -607,19 +608,18 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
         approverId,
       });
-      return true;
+      return 'refused';
     }
   } else {
     log.warn('Channel registration: unknown response value', {
       messagingGroupId: row.messaging_group_id,
       value: payload.value,
     });
-    return true;
+    return 'ignored';
   }
 
   // ── Wire + replay (shared path for connect and create) ──
-  await wireApprovedChannel(row, targetAgentGroupId, approverId);
-  return true;
+  return (await wireApprovedChannel(row, targetAgentGroupId, approverId)) ? 'accepted' : 'ignored';
 }
 
 registerResponseHandler(handleChannelApprovalResponse);

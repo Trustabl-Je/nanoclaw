@@ -284,7 +284,7 @@ describe('unknown-sender request_approval flow', () => {
   it('rejects clicks from an unauthorized user (prevents self-admit via forwarded card)', async () => {
     // Stranger triggers the approval flow; card goes to the owner.
     const { routeInbound } = await import('../../router.js');
-    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
 
     await expectAsyncDelivery(() => routeInbound(stranger('can I play')));
 
@@ -294,18 +294,16 @@ describe('unknown-sender request_approval flow', () => {
 
     // A random user (not the stranger, not the owner, not an admin) tries to
     // click the approval — e.g. they got the card forwarded. Should be
-    // rejected without admitting them.
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.id,
-        value: 'approve',
-        userId: 'random-bystander', // not owner, not admin
-        channelType: 'telegram',
-        platformId: 'dm-random',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    // refused without admitting them, so the card keeps its buttons.
+    const outcome = await dispatchResponse({
+      questionId: pending.id,
+      value: 'approve',
+      userId: 'random-bystander', // not owner, not admin
+      channelType: 'telegram',
+      platformId: 'dm-random',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     // No member added for the stranger.
     const member = await getDb().get(
