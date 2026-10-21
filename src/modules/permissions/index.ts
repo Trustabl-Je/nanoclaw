@@ -510,6 +510,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const options = await buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
     const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
+    // The first card is answered before its question takes the new options, so
+    // none of its buttons can resolve against them (even across a restart).
+    payload.accepted?.();
     await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {
@@ -534,6 +537,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         err,
       });
     }
+    // Accepted even when delivery reports a failure: the choice card may still have
+    // arrived, so the first card must not take clicks against the new options.
     return 'accepted';
   }
 

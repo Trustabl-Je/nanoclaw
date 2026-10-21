@@ -26,6 +26,7 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
+import type { ResponseOutcome } from '../response-registry.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
@@ -858,6 +859,30 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
 
+  const cardClicks = new Map<string, Promise<unknown>>();
+  const answeredCards = new Set<string>();
+  const clickOnCard: ClickOnCard = (questionId, messageId, click) => {
+    if (!messageId) return click();
+    const key = `ncq-answered:${questionId}:${messageId}`;
+    const run = async () => {
+      if (answeredCards.has(key) || (await state.get(key))) return undefined;
+      const clicked = await click();
+      if (clicked.outcome === 'accepted') {
+        // Kept for good (a question can stay pending indefinitely); in memory too, should the write fail.
+        answeredCards.add(key);
+        await state.set(key, true).catch((err: unknown) => log.error('Failed to store an answered card', { err }));
+      }
+      return clicked;
+    };
+    const next = (cardClicks.get(key) ?? Promise.resolve()).then(run);
+    const settled = next.catch(() => undefined);
+    cardClicks.set(key, settled);
+    void settled.then(() => {
+      if (cardClicks.get(key) === settled) cardClicks.delete(key);
+    });
+    return next;
+  };
+
   async function messageToInbound(
     message: ChatMessage,
     isMention: boolean,
@@ -1067,22 +1092,26 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const tail = parts.slice(2).join(':');
         const userId = event.user?.userId || '';
 
-        // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-        const render = await resolveQuestionRender(questionId);
-        // New format: button id/value is an integer index into options (kept
-        // short to fit Telegram's 64-byte callback_data cap). Old format:
-        // the full value is embedded in actionId/value directly.
-        const selectedOption = resolveSelectedOption(render, event.value, tail);
-        const outcome = await setupConfig.onAction(questionId, selectedOption, userId, {
-          instance: instanceKey,
-          messageId: event.messageId,
-          platformId: adapter.channelIdFromThreadId(event.threadId),
+        const clicked = await clickOnCard(questionId, event.messageId, async () => {
+          // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
+          const render = await resolveQuestionRender(questionId);
+          // New format: button id/value is an integer index into options (kept
+          // short to fit Telegram's 64-byte callback_data cap). Old format:
+          // the full value is embedded in actionId/value directly.
+          const selectedOption = resolveSelectedOption(render, event.value, tail);
+          const outcome = await setupConfig.onAction(questionId, selectedOption, userId, {
+            instance: instanceKey,
+            messageId: event.messageId,
+            platformId: adapter.channelIdFromThreadId(event.threadId),
+          });
+          return { outcome, render, selectedOption };
         });
-        if (outcome === 'refused') return tellRefusedClicker(event);
+        if (clicked?.outcome === 'refused') return tellRefusedClicker(event);
         // The card shows a decision only once the host accepted it. No render: already
         // resolved (a late or repeated click), or a pending row without stored render
         // metadata; deferred: the host updates the card itself.
-        if (outcome !== 'accepted' || !render || render.deferResolution) return;
+        if (clicked?.outcome !== 'accepted' || !clicked.render || clicked.render.deferResolution) return;
+        const { render, selectedOption } = clicked;
         const title = render.title ?? '❓ Question';
         const matched = render.options.find((o) => o.value === selectedOption);
         const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
@@ -1115,7 +1144,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         gatewayAbort = new AbortController();
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken, editClickedCard);
+        const webhookUrl = await startLocalWebhookServer(
+          gatewayAdapter,
+          setupConfig,
+          config.botToken,
+          editClickedCard,
+          clickOnCard,
+        );
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -1434,11 +1469,24 @@ type EditClickedCard = (
   clicked: { title: string; question: string; selectedLabel: string; actorName: string },
 ) => Promise<unknown>;
 
+/**
+ * Clicks on one card run one at a time, and a card takes no more clicks once
+ * the host accepted one (resolves undefined). A question can move to a new
+ * card with new options under the same id (channel registration's agent
+ * choice), so a click on the old card must never resolve against them.
+ */
+type ClickOnCard = <T extends { outcome: ResponseOutcome | void }>(
+  questionId: string,
+  messageId: string | undefined,
+  click: () => Promise<T>,
+) => Promise<T | undefined>;
+
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken: string | undefined,
   editClickedCard: EditClickedCard,
+  clickOnCard: ClickOnCard,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -1451,7 +1499,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken, editClickedCard)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, editClickedCard, clickOnCard)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -1486,6 +1534,7 @@ async function handleForwardedEvent(
   setupConfig: ChannelSetup,
   botToken: string | undefined,
   editClickedCard: EditClickedCard,
+  clickOnCard: ClickOnCard,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
@@ -1533,27 +1582,6 @@ async function handleForwardedEvent(
         }
       };
       const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
-      /**
-       * Hands the click to the host; its answer is handled in the background so it
-       * can't hold this event. A refused clicker is told privately (flags 64: only
-       * they see it); `onAccepted` runs only once the host accepted the click.
-       */
-      const decide = (questionId: string, value: string, onAccepted?: () => Promise<void>) => {
-        const outcome = setupConfig.onAction(questionId, value, user?.id || '', {
-          messageId,
-          platformId: interaction.channel_id as string | undefined,
-        });
-        void (async () => {
-          try {
-            const result = await outcome;
-            if (result === 'refused') await webhook('POST', '', { content: REFUSED_CLICK_NOTE, flags: 64 });
-            else if (result === 'accepted') await onAccepted?.();
-            // eslint-disable-next-line no-catch-all/no-catch-all -- the host has decided; only the card update failed
-          } catch (err) {
-            log.error('Failed to update interaction', { err });
-          }
-        })();
-      };
 
       // Parse the selected option from custom_id. The adapter writes
       // `${buttonId}\n${value}` (Chat SDK 4.41+); older cards carry the id alone.
@@ -1570,49 +1598,65 @@ async function handleForwardedEvent(
         }
       }
 
-      // Update the card to show the selected answer and remove buttons
       const originalEmbeds =
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
-      const render = questionId ? await resolveQuestionRender(questionId) : undefined;
-      // Discord custom_id mirrors the new index-based encoding (see Button
-      // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, encodedValue ?? tail, tail);
       // Ack at once and keep the buttons (DEFERRED_UPDATE_MESSAGE): the card
       // changes only after the host accepts the click.
       await ack({ type: 6 });
-      if (!questionId || !render || render.deferResolution) {
-        // Not one of our questions, already resolved (a late, repeated or
-        // re-delivered click), a pending row without stored render metadata,
-        // or a card the host updates itself: let the host decide, leave the card.
-        if (questionId && (selectedOption || render?.deferResolution)) decide(questionId, selectedOption);
-        return;
-      }
-      const cardTitle = render.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
-      const matchedOpt = render.options.find((o) => o.value === selectedOption);
-      const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
-      const actorName = user?.global_name || user?.username || '';
+      if (!questionId) return;
+      const clickedQuestion = questionId;
 
-      // An empty value counts when it is a real option's value.
-      if (selectedOption || render.options.some((option) => option.value === selectedOption)) {
-        decide(questionId, selectedOption, async () => {
-          // Remove the buttons first (components only: the embed stays, so no
-          // length limit can reject it), then edit the card text like every
-          // resolved card, escaped and within the limits.
-          await webhook('PATCH', '/messages/@original', { components: [] });
-          if (!messageId) return;
+      // The rest runs in the background: Discord forwards a channel's events in
+      // order, so neither an earlier click on this card nor the host may hold them.
+      void (async () => {
+        try {
+          const clicked = await clickOnCard(clickedQuestion, messageId, async () => {
+            const render = await resolveQuestionRender(clickedQuestion);
+            // Discord custom_id mirrors the new index-based encoding (see Button
+            // construction). Decode back to the real option value for downstream.
+            const selectedOption = resolveSelectedOption(render, encodedValue ?? tail, tail);
+            // No render: already resolved (a late, repeated or re-delivered click),
+            // or a pending row without stored render metadata. An empty value counts
+            // when it is a real option's value, or on a card the host updates itself.
+            const decidable =
+              selectedOption ||
+              render?.deferResolution ||
+              render?.options.some((option) => option.value === selectedOption);
+            const outcome = decidable
+              ? await setupConfig.onAction(clickedQuestion, selectedOption, user?.id || '', {
+                  messageId,
+                  platformId: interaction.channel_id as string | undefined,
+                })
+              : undefined;
+            return { outcome, render, selectedOption };
+          });
+          // flags 64: only the clicker sees it.
+          if (clicked?.outcome === 'refused')
+            return await webhook('POST', '', { content: REFUSED_CLICK_NOTE, flags: 64 });
+          if (clicked?.outcome !== 'accepted' || !clicked.render || clicked.render.deferResolution || !messageId)
+            return;
+          const { render, selectedOption } = clicked;
+          // Remove the buttons (components only: the embed stays, so no length
+          // limit can reject it) alongside the card text edit, which is escaped
+          // and within the limits like every resolved card; neither waits on the other.
+          void webhook('PATCH', '/messages/@original', { components: [] });
           const threadId = adapter.encodeThreadId({
             guildId: (interaction.guild_id as string | undefined) || '@me',
             channelId: interaction.channel_id as string,
           });
-          await editClickedCard(threadId, messageId, questionId, {
-            title: cardTitle,
+          await editClickedCard(threadId, messageId, clickedQuestion, {
+            title: render.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question'),
             question: render.question ?? originalDescription,
-            selectedLabel,
-            actorName,
+            selectedLabel:
+              render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption ?? customId,
+            actorName: user?.global_name || user?.username || '',
           });
-        });
-      }
+          // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
+        } catch (err) {
+          log.error('Failed to update interaction', { err });
+        }
+      })();
       return;
     }
   }

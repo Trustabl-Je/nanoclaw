@@ -625,6 +625,62 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(1);
   });
 
+  it('a failed agent-choice delivery keeps the new options: the choice card may have arrived', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-choice-undelivered')));
+    const before = (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+      'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+    ))!;
+
+    // A lost response looks the same as a failed post: the card may be in the DM.
+    deliverMock.mockRejectedValueOnce(new Error('response lost'));
+    const outcome = await dispatchResponse({
+      questionId: before.messaging_group_id,
+      value: 'choose_existing',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    // Accepted, so the first card is answered: no button ever resolves against options it didn't show.
+    expect(outcome).toBe('accepted');
+    const after = (await getDb().get<{ options_json: string }>(
+      'SELECT options_json FROM pending_channel_approvals WHERE messaging_group_id = ?',
+      before.messaging_group_id,
+    ))!;
+    expect(after.options_json).not.toBe(before.options_json);
+    expect(after.options_json).toContain('connect:ag-1');
+  });
+
+  it('reports the agent choice accepted while its card is still being delivered', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-choice-early')));
+    const before = (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+      'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+    ))!;
+
+    let release!: () => void;
+    deliverMock.mockImplementationOnce(() => new Promise((resolve) => (release = () => resolve('plat-msg-2'))));
+    const outcome = await dispatchResponse({
+      questionId: before.messaging_group_id,
+      value: 'choose_existing',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    // Known while the choice card is still being delivered (a restart there must not leave the first card open).
+    expect(outcome).toBe('accepted');
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    release();
+  });
+
   it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
