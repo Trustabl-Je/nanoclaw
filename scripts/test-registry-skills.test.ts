@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   copySources,
+  dependencyProblems,
   discover,
   formatUnavailable,
   matrixSkills,
@@ -133,6 +134,35 @@ describe('copy sources', () => {
       { dest: 'src/channels/gchat.ts', branch: 'channels', source: 'src/channels/gchat.ts' },
       { dest: 'src/channels/gchat-registration.test.ts', source: 'payload/src/channels/gchat-registration.test.ts' },
     ]);
+  });
+});
+
+describe('dependency pins after a refresh', () => {
+  it('names each unguarded nc:dep pin its package.json does not hold exactly', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dependency-pins-'));
+    try {
+      const pkg = { dependencies: { qrcode: '1.5.4', pino: '^9.6.0' }, devDependencies: { qrcode: '1.5.3' } };
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(pkg));
+      const meta = skill('add-whatsapp', [], {
+        markdown: [
+          '```nc:dep',
+          'qrcode@1.5.4',
+          'pino@9.6.0',
+          '@whiskeysockets/baileys@7.0.0-rc14',
+          '```',
+          '```nc:dep when:backend=hosted',
+          'spectrum-ts@11.0.0',
+          '```',
+        ].join('\n'),
+      });
+      expect(dependencyProblems(root, meta)).toEqual([
+        'add-whatsapp: package.json lacks qrcode@1.5.4',
+        'add-whatsapp: package.json lacks pino@9.6.0',
+        'add-whatsapp: package.json lacks @whiskeysockets/baileys@7.0.0-rc14',
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

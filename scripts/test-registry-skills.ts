@@ -516,23 +516,69 @@ function barrelProblems(root: string, installed: RegistrySkill[]): string[] {
   });
 }
 
-/** Refresh every installed skill against the pinned channels commit; a refresh selects by barrel import. */
-async function channelRefreshProblems(root: string, channels: string, installed: RegistrySkill[]): Promise<string[]> {
-  pinRegistryRef(root, 'channels', channels);
-  git(['update-ref', 'refs/heads/channels', channels], root);
+/** Each unguarded nc:dep pin is in its package.json exactly, so a later install-mode apply cannot be what adds it. */
+export function dependencyProblems(root: string, meta: RegistrySkill): string[] {
+  return parseDirectives(meta.markdown)
+    .filter((directive) => directive.kind === 'dep' && !directive.attrs.when)
+    .flatMap((directive) => {
+      const file = join(typeof directive.attrs.cwd === 'string' ? directive.attrs.cwd : '', 'package.json');
+      const pkg = JSON.parse(readFileSync(join(root, file), 'utf8')) as Record<string, Record<string, string>>;
+      return directive.body
+        .filter((spec) => {
+          const name = spec.slice(0, spec.lastIndexOf('@'));
+          const found = [pkg.dependencies?.[name], pkg.devDependencies?.[name]].filter(Boolean);
+          return !found.length || found.some((version) => version !== spec.slice(name.length + 1));
+        })
+        .map((spec) => `${meta.skill}: ${file} lacks ${spec}`);
+    });
+}
+
+/**
+ * Refresh every installed skill against the pinned channels commit, then check
+ * what it left: the selection, each copy against its source, the barrel and the
+ * dependency pins. Copies go stale first, so a copy the refresh skipped shows.
+ */
+async function channelRefreshProblems(
+  root: string,
+  refs: Record<string, string>,
+  installed: RegistrySkill[],
+): Promise<string[]> {
+  // update-skills finds an install through its barrel import, so it never refreshes a skill without one.
+  const visible = installed.filter((meta) => barrelLines(meta).length);
+  for (const meta of installed.filter((candidate) => !visible.includes(candidate))) {
+    console.error(`WARN: update-skills cannot refresh ${meta.skill}: it adds no ${CHANNEL_BARREL} import`);
+  }
+  // A trailing newline changes the blob and stays valid text. Patch files are left alone: pnpm re-checks them on every add.
+  for (const { dest } of visible.flatMap(copySources)) {
+    if (!dest.endsWith('.patch') && existsSync(join(root, dest))) appendFileSync(join(root, dest), '\n');
+  }
+  pinRegistryRef(root, 'channels', refs.channels);
+  git(['update-ref', 'refs/heads/channels', refs.channels], root);
   git(['remote', 'remove', 'origin'], root);
   git(['remote', 'add', 'skill-ci', '.'], root);
   const report = await refreshInstalledSkills(root, 'all', { exec: (cmd, cwd) => command(cmd, cwd) });
-  const expected = installed.filter((meta) => barrelLines(meta).length).map(({ skill }) => skill);
+  const expected = visible.map(({ skill }) => skill);
   const actual = report.skills.map(({ skillName }) => skillName);
   const problems = [
     ...actual.filter((name) => !expected.includes(name)).map((name) => `update-skills selected ${name}, not installed`),
     ...expected.filter((name) => !actual.includes(name)).map((name) => `update-skills missed installed ${name}`),
+    ...report.skills
+      .filter(({ status }) => status === 'failed')
+      .map((skill) => `update-skills could not refresh ${skill.skillName}: ${skill.errors.join('; ')}`),
   ];
-  for (const skill of report.skills.filter(({ status }) => status === 'failed')) {
-    problems.push(`update-skills could not refresh ${skill.skillName}: ${skill.errors.join('; ')}`);
+  for (const meta of visible) {
+    for (const { dest, branch, source } of copySources(meta)) {
+      const want = branch ? git(['rev-parse', `${refs[branch]}:${source}`], root) : hashFile(join(meta.dir, source));
+      if (hashFile(join(root, dest)) !== want) {
+        problems.push(`${meta.skill}: ${dest} differs from ${branch ?? meta.skill}:${source}`);
+      }
+    }
   }
-  return problems;
+  return [
+    ...problems,
+    ...barrelProblems(root, installed),
+    ...installed.flatMap((meta) => dependencyProblems(root, meta)),
+  ];
 }
 
 // Each problem is collected, not thrown, so one run names every break.
@@ -572,10 +618,13 @@ async function testCombinedChannels(skills: RegistrySkill[]): Promise<void> {
     await check(problems, 'container typecheck', () =>
       command('pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit', root),
     );
-    await check(problems, 'host tests', () => command('pnpm exec vitest run', root));
+    // About 550 more tests than trunk's suite on the same runner: a slow git fixture is not an adapter break.
+    await check(problems, 'host tests', () =>
+      command('pnpm exec vitest run --testTimeout=20000 --hookTimeout=40000', root),
+    );
     await check(problems, 'container tests', () => command('bun run test', join(root, 'container/agent-runner')));
-    problems.push(...(await channelRefreshProblems(root, refs.channels, selected)));
-    if (problems.length) throw new Error(`combined channels failed:\n${problems.join('\n')}`);
+    problems.push(...(await channelRefreshProblems(root, refs, selected)));
+    if (problems.length) throw new Error(`combined channels failed:\n${[...new Set(problems)].join('\n')}`);
     console.log(`\nPASS: ${selected.map(({ skill }) => skill).join(', ')} install, build, test and refresh together`);
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -636,19 +685,7 @@ async function testOldChannelRefresh(commit: string): Promise<void> {
     console.log(`\n==> merge ${core} and refresh`);
     mergeCore(root, core);
     const skills = pick();
-    // The branch install already matches its source, so make each copy stale: the refresh must rewrite all of them.
-    for (const { dest } of skills.flatMap(copySources)) {
-      if (existsSync(join(root, dest))) appendFileSync(join(root, dest), '\n// stale\n');
-    }
-    const problems = await channelRefreshProblems(root, refs.channels, skills);
-    for (const meta of skills) {
-      for (const { dest, branch, source } of copySources(meta)) {
-        const want = branch ? git(['rev-parse', `${refs[branch]}:${source}`], root) : hashFile(join(meta.dir, source));
-        if (hashFile(join(root, dest)) !== want) {
-          problems.push(`${meta.skill}: ${dest} differs from ${branch ?? meta.skill}:${source}`);
-        }
-      }
-    }
+    const problems = await channelRefreshProblems(root, refs, skills);
     await command('pnpm install --frozen-lockfile --prefer-offline', root);
     await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
     for (const meta of skills) {
