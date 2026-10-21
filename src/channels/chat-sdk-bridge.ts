@@ -902,14 +902,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
    * host, then show only what the host did. A render's afterClick hook may say
    * what to show instead.
    */
-  /** Per card, the latest click that drew it: one the hold cap let go of must not draw over a later one. */
-  const drawnBy = new Map<string, number>();
+  /** Per card, the latest click that drew it, and whether it showed a decision. */
+  const drawnBy = new Map<string, { seq: number; deciding: boolean }>();
   let clicks = 0;
-  /** Claims the card for this click's drawing; false when a later click drew it already. */
-  const mayDraw = (key: string, seq: number) => {
-    if ((drawnBy.get(key) ?? 0) > seq) return false;
+  /**
+   * Claims the card for this click's drawing. A click the hold cap let go of
+   * doesn't draw over a later one, except that a decision always draws over a
+   * card that shows none, and such a card never draws over a decision.
+   */
+  const mayDraw = (key: string, seq: number, deciding: boolean) => {
+    const last = drawnBy.get(key);
+    if (last && (last.deciding ? !deciding || last.seq > seq : !deciding && last.seq > seq)) return false;
     drawnBy.delete(key);
-    drawnBy.set(key, seq);
+    drawnBy.set(key, { seq, deciding });
     if (drawnBy.size > 1000) drawnBy.delete(drawnBy.keys().next().value!);
     return true;
   };
@@ -961,7 +966,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       if (shown) {
         if (shown.privateNote) await transport.notePrivately(shown.privateNote);
         // Drawn as returned: its own buttons, if any, stay.
-        if (shown.card && click.messageId && mayDraw(key, seq)) {
+        const deciding = outcome === 'accepted' || outcome === 'closed';
+        if (shown.card && click.messageId && mayDraw(key, seq, deciding)) {
           await adapter.editMessage(click.threadId, click.messageId, shown.card);
         }
         return;
@@ -972,7 +978,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // stored render metadata; deferred: the host updates the card itself.
       if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
         return;
-      if (!mayDraw(key, seq)) return;
+      if (!mayDraw(key, seq, true)) return;
       transport.removeButtons?.();
       await editClickedCard(click.threadId, click.messageId, click.questionId, {
         title: render.title,

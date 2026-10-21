@@ -187,6 +187,27 @@ describe('reject with reason', () => {
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "too risky for prod"');
   });
 
+  it('ignores a plain Reject on the card while a reason is awaited, so the reason still reaches the agent', async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-reason-then-reject', 'install_packages');
+    await clickRejectWithReason('appr-reason-then-reject');
+
+    const outcome = await handleApprovalsResponse({
+      questionId: 'appr-reason-then-reject',
+      value: 'reject',
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+    });
+    expect(outcome).toBe('ignored');
+    expect((await getPendingApproval('appr-reason-then-reject'))?.status).toBe('awaiting_reason');
+
+    expect(await captureReasonReply(dmReply('not on prod'))).toBe(true);
+    expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "not on prod"');
+  });
+
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
     const { captureReasonReply } = await import('./reason-capture.js');
     await seedApproval('appr-3');

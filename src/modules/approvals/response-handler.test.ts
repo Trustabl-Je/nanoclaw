@@ -161,6 +161,49 @@ describe('approval response authorization', () => {
     expect(await getPendingApproval('appr-gone')).toBeUndefined();
   });
 
+  it('reports a plain Reject accepted once it is recorded, before the agent is woken', async () => {
+    await upsertUser({ id: 'telegram:owner-reject', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner-reject',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+    const { wakeContainer } = await import('../../container-runner.js');
+    // A slow wake (a cold container start).
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await createPendingApproval({
+      approval_id: 'appr-reject-early',
+      session_id: 'sess-1',
+      request_id: 'appr-reject-early',
+      action: 'install_packages',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Install packages',
+      options_json: JSON.stringify([]),
+    });
+    const accepted = vi.fn();
+    void handleApprovalsResponse({
+      questionId: 'appr-reject-early',
+      value: 'reject',
+      userId: 'owner-reject',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      accepted,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const early = accepted.mock.calls.length;
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(early).toBe(1);
+  });
+
   it('lets only one concurrent approval response run the action handler', async () => {
     await upsertUser({ id: 'telegram:owner-race', kind: 'telegram', display_name: 'Owner', created_at: now() });
     await grantRole({
