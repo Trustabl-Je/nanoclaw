@@ -690,6 +690,31 @@ describe('unknown-channel registration flow', () => {
     expect(await dispatchResponse({ ...payload, value: 'choose_existing', messageId: 'card-1' })).toBe('accepted');
   });
 
+  it('an agent-choice delivery that names no card restores the first card, where the first card was named', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    deliverMock.mockResolvedValueOnce('card-1');
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-unnamed-choice')));
+    const before = (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+      'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+    ))!;
+    const payload = {
+      questionId: before.messaging_group_id,
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    };
+    deliverMock.mockResolvedValueOnce(undefined);
+    expect(await dispatchResponse({ ...payload, value: 'choose_existing', messageId: 'card-1' })).toBe('ignored');
+    const after = (await getDb().get<{ options_json: string; card_message_id: string | null }>(
+      'SELECT options_json, card_message_id FROM pending_channel_approvals WHERE messaging_group_id = ?',
+      before.messaging_group_id,
+    ))!;
+    expect(after).toEqual({ options_json: before.options_json, card_message_id: 'card-1' });
+  });
+
   it("a slow first-card delivery result doesn't replace the agent-choice card bound since", async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');

@@ -544,6 +544,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         undefined,
         approverDm.instance,
       );
+      // An unidentified card counts as a failed delivery, unless this channel names
+      // no cards (the first had no id either): then it stays unchecked, as before.
+      if (!cardId && row.card_message_id != null) throw new Error('the agent-choice card was not identified');
       await setPendingChannelApprovalCardMessage(row.messaging_group_id, cardId ?? null, '');
     } catch (err) {
       log.error('Channel registration: agent-selection card delivery failed', {
