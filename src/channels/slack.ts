@@ -248,8 +248,8 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: slackRawTextExtractor(slackAdapter),
-    escapeCardText: escapeSlackMrkdwn,
-    cardFits: fitsSlackHeader,
+    // Spread, so an older core without these options still type-checks (and ignores them).
+    ...{ escapeCardText: escapeSlackMrkdwn, cardFits: fitsSlackHeader },
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
