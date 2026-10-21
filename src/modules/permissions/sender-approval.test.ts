@@ -277,6 +277,27 @@ describe('unknown-sender request_approval flow', () => {
     expect(member !== undefined).toBe(outcomes[0] === 'accepted');
   });
 
+  it('keeps the request pending when adding the member fails', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('add me')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    // Make the member insert fail.
+    await getDb().exec('DROP TABLE agent_group_members');
+    await dispatchResponse({
+      questionId: pending.id,
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+    const stillPending = (await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_sender_approvals'))!.c;
+    expect(stillPending).toBe(1);
+  });
+
   it('deny → deletes the pending row without adding a member', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');

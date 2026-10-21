@@ -398,11 +398,11 @@ export interface ChatSdkBridgeConfig {
    */
   cardFits?: (card: CardElement) => boolean;
   /**
-   * False when a click's message id is the click's own message rather than the
-   * card's (WhatsApp Cloud: a button reply arrives as a new message). The host
-   * then can't tell which card was clicked, so none is named to it.
+   * The clicked card's message id, where a click's own id isn't it (WhatsApp
+   * Cloud: a button reply is a new message that quotes the card). Default: the
+   * click's message id.
    */
-  actionMessageIsCard?: boolean;
+  cardMessageIdOf?: (event: ActionEvent) => string | undefined;
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -506,6 +506,8 @@ const STOPPED_NOTE_WAIT_MS = 5_000;
 const REFUSED_CLICK_NOTE = 'Only an approver can answer this.';
 /** A clicked card whose request the host closed (its session, event or target is gone). */
 const CLOSED_RESOLUTION = 'No longer available';
+/** How long one click may hold its card before the next goes ahead: a stalled card update must not block it. */
+const CARD_CLICK_HOLD_MS = 10_000;
 
 const FENCE = '```';
 /** A fence opens or closes only at the start of a line; backticks mid-line are text. */
@@ -868,13 +870,29 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let gatewayAbort: AbortController | null = null;
 
   const cardClicks = new Map<string, Promise<unknown>>();
-  /** Clicks on one card run one at a time, so a quick second click sees what the first one did. */
+  /**
+   * Clicks on one card run one at a time, display included, so a quick second
+   * click sees what the first one did and a slow first one can't draw over it.
+   */
   const onCard = <T>(key: string, run: () => Promise<T>): Promise<T> => {
-    const next = (cardClicks.get(key) ?? Promise.resolve()).then(run);
-    const settled = next.catch(() => undefined);
-    cardClicks.set(key, settled);
-    void settled.then(() => {
-      if (cardClicks.get(key) === settled) cardClicks.delete(key);
+    const previous = cardClicks.get(key) ?? Promise.resolve();
+    const next = previous.then(run);
+    const held = previous.then(() => {
+      let timer: NodeJS.Timeout | undefined;
+      return Promise.race([
+        next.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, CARD_CLICK_HOLD_MS);
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+    });
+    cardClicks.set(key, held);
+    void held.then(() => {
+      if (cardClicks.get(key) === held) cardClicks.delete(key);
     });
     return next;
   };
@@ -884,7 +902,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
    * host, then show only what the host did. A render's afterClick hook may say
    * what to show instead.
    */
-  const resolveClick: ResolveClick = async (click, transport) => {
+  const resolveClick: ResolveClick = (click, transport) =>
+    click.messageId
+      ? onCard(`${click.questionId}:${click.messageId}`, () => runClick(click, transport))
+      : runClick(click, transport);
+
+  const runClick: ResolveClick = async (click, transport) => {
     const decide = async () => {
       // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
       const render = await resolveQuestionRender(click.questionId);
@@ -895,17 +918,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // An empty value counts when it is a real option's value, or on a card the host updates itself.
       const decidable =
         selectedOption || render?.deferResolution || render?.options.some((o) => o.value === selectedOption);
-      const address = config.actionMessageIsCard === false ? { ...click.address, messageId: undefined } : click.address;
       const outcome = decidable
-        ? ((await setupConfig.onAction(click.questionId, selectedOption, click.userId, address)) as
+        ? ((await setupConfig.onAction(click.questionId, selectedOption, click.userId, click.address)) as
             | ResponseOutcome
             | undefined)
         : undefined;
       return { outcome, render, selectedOption };
     };
-    const { outcome, render, selectedOption } = click.messageId
-      ? await onCard(`${click.questionId}:${click.messageId}`, decide)
-      : await decide();
+    const { outcome, render, selectedOption } = await decide();
 
     let shown: Awaited<ReturnType<NonNullable<QuestionRender['afterClick']>>>;
     try {
@@ -917,10 +937,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     try {
       if (shown) {
         if (shown.privateNote) await transport.notePrivately(shown.privateNote);
-        if (shown.card && click.messageId) {
-          transport.removeButtons?.();
-          await adapter.editMessage(click.threadId, click.messageId, shown.card);
-        }
+        // Drawn as returned: its own buttons, if any, stay.
+        if (shown.card && click.messageId) await adapter.editMessage(click.threadId, click.messageId, shown.card);
         return;
       }
       if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
@@ -1154,6 +1172,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const tail = parts.slice(2).join(':');
         const userId = event.user?.userId || '';
 
+        const messageId = config.cardMessageIdOf ? config.cardMessageIdOf(event) : event.messageId;
         await resolveClick(
           {
             questionId,
@@ -1161,13 +1180,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             value: event.value,
             userId,
             actorName: event.user?.userName || event.user?.fullName || '',
-            messageId: event.messageId,
+            messageId,
             threadId: event.threadId,
-            address: {
-              instance: instanceKey,
-              messageId: event.messageId,
-              platformId: adapter.channelIdFromThreadId(event.threadId),
-            },
+            address: { instance: instanceKey, messageId, platformId: adapter.channelIdFromThreadId(event.threadId) },
           },
           { notePrivately: (text) => tellPrivately(event, text) },
         );

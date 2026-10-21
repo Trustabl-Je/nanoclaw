@@ -29,6 +29,7 @@ import {
   type AccessGateResult,
 } from '../../router.js';
 import type { InboundEvent } from '../../channels/adapter.js';
+import { getDb } from '../../db/connection.js';
 import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -50,6 +51,7 @@ import { addMember } from './db/agent-group-members.js';
 import {
   deletePendingChannelApproval,
   getPendingChannelApproval,
+  restorePendingChannelApprovalCard,
   setPendingChannelApprovalCardMessage,
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
@@ -297,17 +299,24 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<R
   const approved = payload.value === 'approve';
 
   // Deleting the row claims the decision: of two responses, only one proceeds.
-  // On approve it also clears the row BEFORE re-routing, so the gate check on
-  // the second attempt doesn't see the in-flight row and short-circuit.
-  if (!(await deletePendingSenderApproval(row.id))) return 'ignored';
+  // One transaction with the member insert, so a failed insert keeps the request.
+  // It also clears the row BEFORE re-routing, so the gate check on the second
+  // attempt doesn't see the in-flight row and short-circuit.
+  const claimed = await getDb().transaction(async () => {
+    if (!(await deletePendingSenderApproval(row.id))) return false;
+    if (approved) {
+      await addMember({
+        user_id: row.sender_identity,
+        agent_group_id: row.agent_group_id,
+        added_by: approverId,
+        added_at: new Date().toISOString(),
+      });
+    }
+    return true;
+  });
+  if (!claimed) return 'ignored';
 
   if (approved) {
-    await addMember({
-      user_id: row.sender_identity,
-      agent_group_id: row.agent_group_id,
-      added_by: approverId,
-      added_at: new Date().toISOString(),
-    });
     log.info('Unknown sender approved — member added', {
       approvalId: row.id,
       senderIdentity: row.sender_identity,
@@ -535,13 +544,16 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         undefined,
         approverDm.instance,
       );
-      await setPendingChannelApprovalCardMessage(row.messaging_group_id, cardId ?? null);
+      await setPendingChannelApprovalCardMessage(row.messaging_group_id, cardId ?? null, '');
     } catch (err) {
-      // No card counts now: a lost response can't tell a posted card from none.
       log.error('Channel registration: agent-selection card delivery failed', {
         messagingGroupId: row.messaging_group_id,
         err,
       });
+      // The first card keeps its buttons and their meaning; a choice card that did
+      // arrive (a lost response) isn't the live card, so its clicks are ignored.
+      await restorePendingChannelApprovalCard(row);
+      return 'ignored';
     }
     return 'accepted';
   }

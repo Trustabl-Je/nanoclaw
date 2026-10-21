@@ -1965,7 +1965,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     }
   });
 
-  it('names no card to the host where a click is not the card message', async () => {
+  it('names the quoted card to the host where a click is a reply message', async () => {
     const { initTestDb } = await import('../db/connection.js');
     const { runMigrations } = await import('../db/migrations/index.js');
     const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
@@ -1978,8 +1978,12 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
       editMessage: vi.fn(),
     });
     const onAction = vi.fn().mockResolvedValue('accepted');
-    // A button reply that arrives as its own message (WhatsApp Cloud).
-    const bridge = createChatSdkBridge({ adapter, supportsThreads: false, actionMessageIsCard: false });
+    // A button reply that arrives as its own message quoting the card (WhatsApp Cloud).
+    const bridge = createChatSdkBridge({
+      adapter,
+      supportsThreads: false,
+      cardMessageIdOf: (event) => (event.raw as { context?: { id?: string } }).context?.id,
+    });
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
     try {
       const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
@@ -1988,7 +1992,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
           actionId: 'ncq:q-reply-id:0',
           adapter,
           messageId: 'reply-7',
-          raw: {},
+          raw: { context: { id: 'card-3' } },
           threadId: 'fixture:room',
           user: { userId: 'approver', userName: 'Ann' } as never,
           value: '0',
@@ -1997,9 +2001,32 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
       );
       expect(onAction.mock.calls[0][3]).toEqual({
         instance: 'fixture',
-        messageId: undefined,
+        messageId: 'card-3',
         platformId: 'fixture:room',
       });
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it("holds the card while a click's display runs, so a slow refused click can't overwrite a later decision", async () => {
+    let releaseFirst!: () => void;
+    const afterClick = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (releaseFirst = () => resolve({ card: { markdown: 'Still waiting' } }))),
+      )
+      .mockResolvedValueOnce(undefined);
+    const { bridge, click, onAction, editMessage } = await startClicks('q-hold-display', { ...review, afterClick });
+    onAction.mockResolvedValueOnce('refused').mockResolvedValueOnce('accepted');
+    try {
+      const first = click('bystander', 'Bob');
+      const second = click('approver', 'Ann');
+      await vi.waitFor(() => expect(afterClick).toHaveBeenCalledTimes(1));
+      releaseFirst();
+      await Promise.all([first, second]);
+      const edits = editMessage.mock.calls.map((call) => JSON.stringify(call));
+      expect(edits.at(-1)).toContain('✅ Approved by Ann');
     } finally {
       await bridge.teardown();
     }
@@ -2320,6 +2347,8 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
         expect(editMessage).toHaveBeenCalledWith('discord:G1:C1', 'card-1', { markdown: 'Only Cy decides' }),
       );
       expect(discordCalls()).toContainEqual(['POST', FOLLOW_UP, { content: 'Only Cy can approve this.', flags: 64 }]);
+      // The returned card is drawn as returned: no separate button removal.
+      expect(discordCalls().filter(([method]) => method === 'PATCH')).toEqual([]);
     } finally {
       await bridge.teardown();
     }
