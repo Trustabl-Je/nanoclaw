@@ -647,6 +647,65 @@ describe('local web adapter', () => {
     }
   });
 
+  it('leaves a card the host updates itself (a gateway approval) to the host', async () => {
+    const { registry, url, auth } = await startAdapter();
+    const abort = new AbortController();
+    try {
+      const { createPendingApproval } = await import('../db/sessions.js');
+      await createPendingApproval({
+        approval_id: 'appr-local-gateway',
+        request_id: 'req-1',
+        action: 'gateway_request',
+        payload: '{}',
+        agent_group_id: 'ag-web',
+        channel_type: 'local-web',
+        platform_id: 'local-web:local',
+        instance: 'local-web',
+        created_at: new Date().toISOString(),
+        title: 'Allow the request?',
+        question: 'Q',
+        options_json: JSON.stringify([{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }]),
+      });
+      const response = await fetch(`${url}/events?conversationId=mg-web`, {
+        headers: { ...auth, origin: url },
+        signal: abort.signal,
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await registry.createChannelDeliveryAdapter().deliver(
+        'local-web',
+        'local-web:local',
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          type: 'ask_question',
+          questionId: 'appr-local-gateway',
+          title: 'Allow?',
+          question: 'Q',
+          options: [],
+        }),
+        undefined,
+        'local-web',
+      );
+      await reader.read();
+      const answered = await fetch(`${url}/api/actions`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json', origin: url },
+        body: JSON.stringify({ conversationId: 'mg-web', questionId: 'appr-local-gateway', option: 0 }),
+      });
+      expect(answered.status).toBe(202);
+      // The coordinator posts the final text (which can carry more than "Approved"); nothing comes from here.
+      const next = await Promise.race([
+        reader.read().then((chunk) => new TextDecoder().decode(chunk.value)),
+        new Promise<string>((resolve) => setTimeout(() => resolve('nothing'), 100)),
+      ]);
+      expect(next).toBe('nothing');
+    } finally {
+      abort.abort();
+      await registry.teardownChannelAdapters();
+    }
+  });
+
   it('shows activity only until the first visible turn output', async () => {
     const { registry, url, auth } = await startAdapter();
     const abort = new AbortController();

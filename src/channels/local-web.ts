@@ -469,11 +469,14 @@ function createAdapter(): ChannelAdapter {
         sendJson(res, 409, { error: 'This question is no longer pending.' });
         return;
       }
-      publish(platformId, {
-        type: 'question-resolution',
-        questionId: parsed.questionId,
-        resolution: selected.selectedLabel,
-      });
+      // A card the host updates itself (a gateway approval) gets its final text from there.
+      if (!render.deferResolution) {
+        publish(platformId, {
+          type: 'question-resolution',
+          questionId: parsed.questionId,
+          resolution: selected.selectedLabel,
+        });
+      }
       sendJson(res, 202, { ok: true });
       return;
     }
