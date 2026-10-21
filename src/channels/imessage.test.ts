@@ -303,7 +303,7 @@ function makeFakeSdk(options: { missingReactionTarget?: boolean } = {}) {
   return { sdk, queue, sends, stop, reacted, makeSpace };
 }
 
-function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'ignored'> = []) {
+function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'ignored' | 'void'> = []) {
   const inbound: Array<{ platformId: string; msg: InboundMessage }> = [];
   const metadata: Array<{ platformId: string; isGroup?: boolean }> = [];
   const actions: Array<{ questionId: string; option: string; userId: string }> = [];
@@ -317,7 +317,9 @@ function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'ignored'> = []
     },
     onAction: async (questionId, option, userId) => {
       actions.push({ questionId, option, userId });
-      return outcomes.shift() ?? 'accepted';
+      const next = outcomes.shift() ?? 'accepted';
+      // 'void': a core from before click outcomes, whose onAction returns nothing.
+      return (next === 'void' ? undefined : next) as never;
     },
   };
   return { config, inbound, metadata, actions };
@@ -660,6 +662,31 @@ describe('photon adapter (mocked SDK)', () => {
     await waitFor(() => confirmations().length === 1);
     expect(host.inbound).toHaveLength(0);
 
+    await adapter.teardown();
+  });
+
+  it('confirms an answer when the host returns nothing (a core from before click outcomes)', async () => {
+    const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['void']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const confirmations = () =>
+      sends.filter(
+        (s) => String(s.builder.payload).includes('Approve') && !String(s.builder.payload).includes('Ship it?'),
+      );
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    queue.push([
+      space,
+      { id: 'r1', direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+    ]);
+    await waitFor(() => confirmations().length === 1);
     await adapter.teardown();
   });
 

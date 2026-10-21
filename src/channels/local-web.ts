@@ -460,7 +460,9 @@ function createAdapter(): ChannelAdapter {
       }
       const selected = render.options[parsed.option]!;
       // The question shows as answered only once the host accepts the answer.
-      const outcome = await setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
+      const result: unknown = await setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
+      // A core from before click outcomes returns nothing: answered as before.
+      const outcome = result === undefined ? 'accepted' : result;
       if (outcome === 'refused') {
         sendJson(res, 403, { error: 'Only an approver can answer this.' });
         return;

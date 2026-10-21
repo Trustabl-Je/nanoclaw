@@ -43,7 +43,6 @@ import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ResponseOutcome } from '../response-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type {
   ChannelAdapter,
@@ -115,6 +114,11 @@ function optionToCommand(option: string): string {
 }
 
 type PendingQuestion = { questionId: string; options: NormalizedOption[] };
+/**
+ * What the host did with an answer, read loosely: this file is copied onto cores
+ * of any age, and one from before click outcomes returns nothing (undefined).
+ */
+type AnswerOutcome = 'accepted' | 'refused' | 'closed' | 'ignored' | undefined;
 /** Per question, the answer with the host right now: a later answer waits for it. */
 const answering = new WeakMap<PendingQuestion, Promise<unknown>>();
 
@@ -133,7 +137,7 @@ export async function answerPendingQuestion(
   sender: string,
   onAction: ChannelSetup['onAction'],
   confirm: (option: NormalizedOption) => Promise<unknown>,
-): Promise<{ questionId: string; value: string; outcome: ResponseOutcome | void } | undefined> {
+): Promise<{ questionId: string; value: string; outcome: AnswerOutcome } | undefined> {
   const pending = pendingQuestions.get(chatJid);
   if (!pending || !text.startsWith('/')) return undefined;
   const cmd = text.trim().toLowerCase();
@@ -142,9 +146,12 @@ export async function answerPendingQuestion(
   const turn = (answering.get(pending) ?? Promise.resolve()).then(async () => {
     // Closed by the answer before this one: swallowed, not sent to the agent.
     if (pendingQuestions.get(chatJid) !== pending) return undefined;
-    const outcome = await onAction(pending.questionId, matched.value, sender);
-    if (outcome !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
-    if (outcome === 'accepted') await confirm(matched);
+    const result: unknown = await onAction(pending.questionId, matched.value, sender);
+    const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
+    // A core from before click outcomes returns nothing: answered as before.
+    const shown = outcome ?? 'accepted';
+    if (shown !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+    if (shown === 'accepted') await confirm(matched);
     return outcome;
   });
   answering.set(

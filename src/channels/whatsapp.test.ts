@@ -139,6 +139,22 @@ describe('answerPendingQuestion', () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
+  it('confirms and closes the question when the host returns nothing (a core from before click outcomes)', async () => {
+    const questions = fresh();
+    const confirm = vi.fn(async () => undefined);
+    const answered = await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      () => {},
+      confirm,
+    );
+    expect(answered?.outcome).toBeUndefined();
+    expect(confirm).toHaveBeenCalledWith(approve);
+    expect(questions.has('chat@g.us')).toBe(false);
+  });
+
   it('is not an answer when no question is pending or the command matches no option', async () => {
     const onAction = vi.fn();
     expect(await answerPendingQuestion(fresh(), 'chat@g.us', '/later', 'u', onAction, vi.fn())).toBeUndefined();

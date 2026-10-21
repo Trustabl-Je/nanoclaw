@@ -47,7 +47,7 @@ async function startAdapter(options: { routeMessages?: boolean } = {}) {
   const inbound: Array<{ platformId: string; threadId: string | null; message: InboundMessage }> = [];
   const actions: Array<{ questionId: string; selectedOption: string; userId: string }> = [];
   // What the host does with the next answer.
-  const host = { outcome: 'accepted' as 'accepted' | 'refused' | 'closed' | 'ignored' };
+  const host = { outcome: 'accepted' as 'accepted' | 'refused' | 'closed' | 'ignored' | undefined };
   await registry.initChannelAdapters(() => ({
     onInbound: async (platformId, threadId, message) => {
       inbound.push({ platformId, threadId, message });
@@ -72,7 +72,8 @@ async function startAdapter(options: { routeMessages?: boolean } = {}) {
     onMetadata: () => {},
     onAction: async (questionId, selectedOption, userId) => {
       actions.push({ questionId, selectedOption, userId });
-      return host.outcome;
+      // undefined plays a core from before click outcomes.
+      return host.outcome as never;
     },
   }));
   const auth = {
@@ -634,13 +635,20 @@ describe('local web adapter', () => {
       expect(refused.status).toBe(403);
       expect(await refused.json()).toEqual({ error: 'Only an approver can answer this.' });
 
+      // A core from before click outcomes returns nothing: answered as before.
+      host.outcome = undefined;
+      const fromOldCore = await answer();
+      expect(fromOldCore.status).toBe(202);
+      expect(await fromOldCore.json()).toEqual({ ok: true, resolution: 'Approved' });
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('"resolution":"Approved"');
+
       host.outcome = 'accepted';
       const accepted = await answer();
       expect(accepted.status).toBe(202);
       // The browser shows the resolution the server gives it.
       expect(await accepted.json()).toEqual({ ok: true, resolution: 'Approved' });
-      expect(actions).toHaveLength(2);
-      // The first event after both answers is the one resolution: the refused answer published nothing.
+      expect(actions).toHaveLength(3);
+      // The next event is this answer's resolution: the refused answer published nothing.
       expect(new TextDecoder().decode((await reader.read()).value)).toContain(
         '"type":"question-resolution","questionId":"appr-local-refused","resolution":"Approved"',
       );

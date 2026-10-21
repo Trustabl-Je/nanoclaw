@@ -551,7 +551,9 @@ export function createPhotonAdapter(
       if (matched) {
         // Confirmed only once the host accepts it; a refused answer keeps the
         // question open for an approver (no private reply here, so nothing is sent).
-        const outcome = await setupConfig.onAction(pending.questionId, matched.value, sender);
+        const result: unknown = await setupConfig.onAction(pending.questionId, matched.value, sender);
+        // A core from before click outcomes returns nothing: answered as before.
+        const outcome = result === undefined ? 'accepted' : result;
         if (outcome !== 'refused' && pendingQuestions.get(platformId) === pending) pendingQuestions.delete(platformId);
         if (outcome === 'accepted') {
           await deliverText(platformId, `${matched.selectedLabel}`).catch((err) =>
