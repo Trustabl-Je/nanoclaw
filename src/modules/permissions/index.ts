@@ -403,6 +403,7 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
+    disarmNamePrompts(row.messaging_group_id);
     return 'closed';
   }
 
@@ -426,6 +427,7 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
+    disarmNamePrompts(row.messaging_group_id);
     return 'closed';
   }
 
@@ -639,7 +641,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       dmPlatformId: approverDm.platform_id,
       dmInstance: approverDm.instance ?? approverDm.channel_type,
     };
-    awaitingNameInput.set(row.approver_user_id, prompt);
+    // Armed in the registration's turn and only while it is undecided: a Connect or
+    // Reject that finished meanwhile must not leave a prompt that swallows a later DM.
+    const armed = await onRegistration(row.messaging_group_id, async () => {
+      if (!(await getPendingChannelApproval(row.messaging_group_id))) return false;
+      awaitingNameInput.set(row.approver_user_id, prompt);
+      return true;
+    });
+    if (!armed) return 'ignored';
 
     try {
       await adapter.deliver(
