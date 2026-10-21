@@ -505,8 +505,13 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
-    await setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
-    await deletePendingChannelApproval(row.messaging_group_id);
+    // Claimed like a connect: of a racing Reject and connect, only one decides.
+    const claimed = await getDb().transaction(async () => {
+      if (!(await deletePendingChannelApproval(row.messaging_group_id))) return false;
+      await setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
+      return true;
+    });
+    if (!claimed) return 'ignored';
     log.info('Channel registration denied', {
       messagingGroupId: row.messaging_group_id,
       approverId,

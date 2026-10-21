@@ -61,8 +61,14 @@ let delivered: Array<{
   instance?: string;
 }>;
 
+/** A test can hold the next delivery until it releases it. */
+let deliverHold: Promise<void> | undefined;
+
 const fakeAdapter: ChannelDeliveryAdapter = {
   async deliver(channelType, platformId, threadId, _kind, content, _files, instance) {
+    const hold = deliverHold;
+    deliverHold = undefined;
+    await hold;
     delivered.push({ channelType, platformId, threadId, content, instance });
     return 'pm-1';
   },
@@ -206,6 +212,28 @@ describe('reject with reason', () => {
 
     expect(await captureReasonReply(dmReply('not on prod'))).toBe(true);
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "not on prod"');
+  });
+
+  it('reports "Reject with reason" accepted only once a reason can be captured', async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-arm-first', 'install_packages');
+    let posted!: () => void;
+    deliverHold = new Promise<void>((resolve) => (posted = resolve));
+    const accepted = vi.fn();
+    const outcome = handleApprovalsResponse({
+      questionId: 'appr-arm-first',
+      value: REJECT_WITH_REASON_VALUE,
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+      accepted,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The prompt is still on its way: the card must not show it yet.
+    expect(accepted).not.toHaveBeenCalled();
+    posted();
+    expect(await outcome).toBe('accepted');
   });
 
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {

@@ -63,6 +63,13 @@ describe('question answers', () => {
     expect(writeSessionMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('puts the question back when the answer could not be written, so it can be answered again', async () => {
+    vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    expect(await answer('a')).toBe('ignored');
+    expect(await answer('a')).toBe('accepted');
+    expect(writeSessionMessage).toHaveBeenCalledTimes(2);
+  });
+
   it('reports the answer accepted before the agent is woken', async () => {
     let wake!: () => void;
     vi.mocked(wakeContainer).mockImplementationOnce(() => new Promise((resolve) => (wake = () => resolve(true))));
