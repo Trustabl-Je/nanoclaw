@@ -45,7 +45,8 @@ registerChannelAdapter('gchat', {
     });
     return createChatSdkBridge({
       adapter: gchatAdapter,
-      escapeCardText: escapeGChatHtml,
+      // Spread, so an older core without this option still type-checks (and ignores it).
+      ...{ escapeCardText: escapeGChatHtml },
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: GCHAT_DEFAULTS,

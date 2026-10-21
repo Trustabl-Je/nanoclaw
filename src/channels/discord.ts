@@ -133,7 +133,8 @@ registerChannelAdapter('discord', {
       // Discord rejects messages over 2000 chars; without this the bridge
       // would let long agent replies fail instead of splitting them.
       maxTextLength: 2000,
-      cardFits: fitsDiscordEmbed,
+      // Spread, so an older core without this option still type-checks (and ignores it).
+      ...{ cardFits: fitsDiscordEmbed },
     });
   },
   defaults: DISCORD_DEFAULTS,

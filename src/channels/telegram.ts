@@ -449,7 +449,8 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // front of the new one, downgraded **bold** to *single-star* — which the
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
-    cardFits: fitsTelegramMessage,
+    // Spread, so an older core without this option still type-checks (and ignores it).
+    ...{ cardFits: fitsTelegramMessage },
   });
 
   const botUsernamePromise = fetchBotUsername(token);
