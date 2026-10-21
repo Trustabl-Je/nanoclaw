@@ -62,13 +62,22 @@ export function getResponseHandlers(): readonly ResponseHandler[] {
 export function dispatchResponse(payload: ResponsePayload): Promise<ResponseOutcome> {
   return new Promise((resolve) => {
     void (async () => {
-      const owned = { ...payload, accepted: () => resolve('accepted') };
+      let accepted = false;
+      const owned = {
+        ...payload,
+        accepted: () => {
+          accepted = true;
+          resolve('accepted');
+        },
+      };
       for (const handler of responseHandlers) {
         try {
           const outcome = await handler(owned);
           if (outcome) return resolve(outcome === true ? 'ignored' : outcome);
         } catch (err) {
           log.error('Response handler threw', { questionId: payload.questionId, err });
+          // A handler that accepted the click owns it, even when its follow-up work throws.
+          if (accepted) return;
         }
       }
       log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
