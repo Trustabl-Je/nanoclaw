@@ -1115,6 +1115,46 @@ describe('unknown-channel registration flow', () => {
     expect(notes.some((note) => note.includes('already been connected another way'))).toBe(false);
   });
 
+  it("a New agent click that finishes after a Connect doesn't arm a prompt for the decided request", async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { ensureUserDm } = await import('./user-dm.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-late-arm')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const payload = { questionId, userId: 'owner', channelType: 'telegram', platformId: 'dm-owner', threadId: null };
+    // "New agent" is held in its DM lookup while a Connect decides the request.
+    const realLookup = vi.mocked(ensureUserDm).getMockImplementation()!;
+    let resume!: () => void;
+    vi.mocked(ensureUserDm).mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => (resume = resolve));
+      return realLookup(...args);
+    });
+    const newAgent = dispatchResponse({ ...payload, value: 'new_agent' });
+    await vi.waitFor(() => expect(resume).toBeTypeOf('function'));
+    expect(await dispatchResponse({ ...payload, value: 'connect:ag-1' })).toBe('accepted');
+    resume();
+    expect(await newAgent).toBe('ignored');
+
+    // The owner's next ordinary DM is not taken as an agent name.
+    vi.mocked(wakeContainer).mockClear();
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: 'after-late-arm',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Afterthought' }),
+        timestamp: now(),
+      },
+    });
+    expect(await getDb().get("SELECT id FROM agent_groups WHERE name = 'Afterthought'")).toBeUndefined();
+  });
+
   it('a name reply after the registration vanished is consumed without creating anything', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
