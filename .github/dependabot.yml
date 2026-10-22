@@ -52,7 +52,7 @@ updates:
 
   # The agent runner (bun.lock). The agent image bakes this lockfile, so after a
   # bump, installs on the pinned image warn about lock drift until the next
-  # release image. Bun groups take no dependency-type.
+  # release image.
   - package-ecosystem: bun
     directory: /container/agent-runner
     schedule:
@@ -61,9 +61,16 @@ updates:
       time: "06:00"
     cooldown:
       default-days: 7
+      # The SDKs are 0.x, where a minor bump can break: hold it like a major.
+      semver-minor-days: 14
       semver-major-days: 14
     groups:
-      agent-runner-minor-patch:
+      # Only typings and the compiler are grouped (bun groups take no
+      # dependency-type). Runtime deps, the agent SDK among them, come one PR
+      # each: CLAUDE.md asks for deliberate bumps and this tree has no release-age
+      # gate. claude-code moves on its own, in the skill-pins entry below.
+      agent-runner-dev:
+        patterns: ["@types/*", "typescript"]
         update-types: [minor, patch]
     ignore:
       - dependency-name: "@types/node"
