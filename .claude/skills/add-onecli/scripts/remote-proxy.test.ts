@@ -57,13 +57,26 @@ describe('remoteProxyHint', () => {
     for (const base of ['host.docker.internal:10255', 'localhost:10255', '127.0.0.1:10255']) {
       const hint = remoteProxyHint(GATEWAY, config(base), [], own);
       expect(hint).toContain(base);
-      expect(hint).toContain('GATEWAY_BASE_URL=192.168.107.212:10255');
-      expect(hint).toContain('docker compose up -d');
-      // Recreate on the running image: the installer does not persist ONECLI_VERSION.
-      expect(hint).toContain("docker inspect -f '{{.Config.Image}}' onecli");
+      // The port the gateway publishes, which a custom ONECLI_GATEWAY_PORT moves off 10255.
+      expect(hint).toContain('echo "GATEWAY_BASE_URL=192.168.107.212:${gw##*:}" >> .env');
+      expect(hint).toContain('gw="$(docker port onecli 10255/tcp | head -n1)"');
+      // Recreate as it runs: the installer may not have saved its image, bind or ports.
+      expect(hint).toContain(`img="$(docker inspect -f '{{.Config.Image}}' onecli)" && `);
+      expect(hint).toContain(
+        'ONECLI_VERSION="${img##*:}" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
+          'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli',
+      );
       expect(hint).not.toContain('env -u ONECLI_VERSION');
       expect(hint).not.toContain('\n');
     }
+  });
+
+  it('stops before any change when the gateway container cannot be read', () => {
+    const hint = remoteProxyHint(GATEWAY, config('host.docker.internal:10255'), [], own) ?? '';
+    const command = hint.slice(hint.indexOf('cd ~/.onecli'), hint.indexOf('docker compose up'));
+    // Every read feeds an && chain, and an empty port (pipe to head) is caught.
+    expect(command).not.toMatch(/;|\|\|/);
+    expect(command).toContain('[ -n "$gw" ] && [ -n "$app" ] && echo');
   });
 
   it('never prints the agent token or proxy credentials', () => {
@@ -88,7 +101,7 @@ describe('remoteProxyHint', () => {
     const named = 'http://nanoclaw.local:10254';
     expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.215'], own)).toBeNull();
     expect(remoteProxyHint(named, config('host.docker.internal:10255'), ['192.168.107.212'], own)).toContain(
-      'GATEWAY_BASE_URL=nanoclaw.local:10255',
+      'GATEWAY_BASE_URL=nanoclaw.local:${gw##*:}',
     );
   });
 
@@ -210,7 +223,7 @@ describe('checkRemoteProxy', () => {
   it('warns for a remote gateway that hands out the default proxy', async () => {
     const res = await checkRemoteProxy(GATEWAY, TOKEN, { fetchImpl: ok(), lookup: none, ownAddresses: own });
     expect(res.status).toBe('warn');
-    expect(res.hint).toContain('GATEWAY_BASE_URL=192.168.107.212:10255');
+    expect(res.hint).toContain('GATEWAY_BASE_URL=192.168.107.212:${gw##*:}');
   });
 
   it('passes a remote gateway that hands out its own address', async () => {

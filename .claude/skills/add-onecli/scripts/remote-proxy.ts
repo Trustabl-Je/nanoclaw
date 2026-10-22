@@ -125,13 +125,22 @@ export function remoteProxyHint(
   const gatewayHost = new URL(gatewayUrl).hostname;
   if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, own))) return null;
   const port = proxy.port || '80';
+  // Recreate onecli alone, on the image, bind and ports it runs with now: the
+  // installer may not have saved them, and compose's defaults are `latest` and
+  // loopback. A failed read stops the chain before anything changes.
+  const recreate =
+    `cd ~/.onecli && img="$(docker inspect -f '{{.Config.Image}}' onecli)" && ` +
+    'gw="$(docker port onecli 10255/tcp | head -n1)" && app="$(docker port onecli 10254/tcp | head -n1)" && ' +
+    '[ -n "$gw" ] && [ -n "$app" ] && ' +
+    `echo "GATEWAY_BASE_URL=${gatewayHost}:\${gw##*:}" >> .env && ` +
+    'ONECLI_VERSION="${img##*:}" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
+    'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli';
   return (
     `The remote OneCLI gateway tells agents to use the proxy ${proxy.hostname}:${port}, their own machine, ` +
-    `so model calls will hang with no reply. On the gateway host, add GATEWAY_BASE_URL=${gatewayHost}:${port} ` +
-    "to ~/.onecli/.env (or to the onecli service's environment: if its compose file does not load that .env), " +
-    'then recreate it on the image it runs now: cd ~/.onecli && ' +
-    `ONECLI_VERSION="$(docker inspect -f '{{.Config.Image}}' onecli | sed 's/.*://')" docker compose up -d. ` +
-    'Re-run setup to check.'
+    'so model calls will hang with no reply. On the gateway host, set GATEWAY_BASE_URL to its own address and ' +
+    `the gateway port it publishes, and recreate the onecli service as it runs now: ${recreate}. ` +
+    `If its compose file does not load ~/.onecli/.env, set GATEWAY_BASE_URL=${gatewayHost}:<published gateway port> ` +
+    "in the onecli service's environment instead. Re-run setup to check."
   );
 }
 
