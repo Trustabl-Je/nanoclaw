@@ -153,7 +153,7 @@ describe('copy sources', () => {
       ].join('\n'),
     });
     expect(barrelLines(meta)).toEqual(["import './imessage.js';"]);
-    // A refresh has no install answers, so the job names the guarded one instead of checking it.
+    // Its guard hangs on install answers the harness does not reproduce, so the job names it instead.
     expect(guardedDirectives(meta)).toEqual([4]);
   });
 });
