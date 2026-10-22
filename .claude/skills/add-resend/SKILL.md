@@ -23,6 +23,7 @@ Fetch the `channels` branch and copy the Resend adapter into `src/channels/`
 
 ```nc:copy from-branch:channels
 src/channels/resend.ts
+src/channels/resend.test.ts
 src/channels/resend-registration.test.ts
 ```
 
@@ -54,13 +55,16 @@ domain is verified manually once the service runs.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/resend-registration.test.ts
+pnpm exec vitest run src/channels/resend-registration.test.ts src/channels/resend.test.ts
 ```
 
 `resend-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `resend`. It goes red if the import line is deleted or drifts,
 if the barrel fails to evaluate, or if `@resend/chat-sdk-adapter` isn't installed
 (the import throws) — so it also covers the dependency from step 3.
+`resend.test.ts` sends through the real adapter with only Resend's HTTP API
+stubbed: the hello to `resend:<address>` goes out, and a reply lands in the
+thread the person last wrote in.
 
 ## Credentials
 
