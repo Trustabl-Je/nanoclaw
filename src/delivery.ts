@@ -160,7 +160,8 @@ function overdueKey(sessionId: string, messageId: string): string {
  * Drains a tick stopped waiting on (see TICK_DRAIN_WAIT_MS), shared by both
  * polls. Capped at DELIVERY_CONCURRENCY, so drains in flight stay bounded:
  * each poll's DELIVERY_CONCURRENCY plus this many. Past the cap a tick waits
- * on its drains, about two deadlines at most (see the drain's row budget).
+ * on its drains again, so with more hung sessions than the cap a tick slows
+ * by about one deadline per DELIVERY_CONCURRENCY of them.
  */
 const backgroundDrains = new Set<Promise<void>>();
 
@@ -582,7 +583,16 @@ function parkOverdueDelivery(
       () => log.info('Overdue message delivery landed', { messageId: msg.id, sessionId: session.id }),
       async (err) => {
         // After a give-up this attempt is already counted.
-        if (!gaveUp) await failDelivery(msg, session, agentGroup, err);
+        if (gaveUp) return;
+        // A retry of a given-up row: the original may have landed meanwhile.
+        if (await alreadyRecorded(agentGroup, session, msg.id)) {
+          log.info('Overdue send failed for a row already recorded, keeping that record', {
+            messageId: msg.id,
+            sessionId: session.id,
+          });
+          return;
+        }
+        await failDelivery(msg, session, agentGroup, err);
       },
     )
     .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))

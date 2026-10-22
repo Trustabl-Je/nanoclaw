@@ -615,4 +615,36 @@ describe('delivery deadline', () => {
 
     expect(await getDb().get('SELECT 1 FROM delivery_attempts WHERE message_id = ?', 'out-z')).toBeUndefined();
   });
+  it('a parked retry that fails after the original landed leaves no attempt row behind', async () => {
+    insertOutbound(session, 'out-w');
+    const original = deferred<string>();
+    const retry = deferred<string>();
+    recordingAdapter((text, call) => (call === 1 ? original.promise : retry.promise));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GIVE_UP_MS);
+    await drain.promise;
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('never settled'), expect.anything()),
+    );
+
+    // The retry is parked too; then the original lands and the retry fails.
+    const second = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await second.promise;
+    original.resolve('pm-original');
+    await vi.waitFor(() => expect(deliveredRow(session, 'out-w')?.status).toBe('delivered'));
+    retry.reject(new Error('retry failed'));
+    await vi.waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        expect.stringContaining('already recorded'),
+        expect.objectContaining({ messageId: 'out-w' }),
+      ),
+    );
+
+    expect(await getDb().get('SELECT 1 FROM delivery_attempts WHERE message_id = ?', 'out-w')).toBeUndefined();
+  });
 });
