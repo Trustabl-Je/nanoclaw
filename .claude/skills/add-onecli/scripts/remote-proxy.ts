@@ -76,9 +76,9 @@ export function advertisedProxy(config: unknown): URL | null {
 
 /**
  * The container config of an existing agent: the seeded "default", else the
- * project's current default. Always named, because without `agent=` OneCLI
- * creates a default agent, with access to every secret, when none exists.
- * Never throws: setup only warns from it.
+ * project's current default. Always named: OneCLI answers 404 for an unknown
+ * name, but without `agent=` it creates a default agent when none exists (up
+ * to 1.43 with access to every secret). Never throws: setup only warns from it.
  */
 export async function readContainerConfig(
   gatewayUrl: string,
