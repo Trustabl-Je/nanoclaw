@@ -161,8 +161,8 @@ function command(cmd: string, cwd: string, quiet = false): Promise<string> {
 }
 
 /**
- * Each copy a refresh re-applies, with its source: a registry branch path, or a file
- * in the skill directory. A refresh has no install answers, so it skips `when:` copies.
+ * Each unguarded copy with its source: a registry branch path, or a file in the skill
+ * directory. A `when:` copy hangs on answers or captured values the harness does not reproduce.
  */
 export function copySources(meta: RegistrySkill): Array<{ dest: string; branch?: string; source: string }> {
   return parseDirectives(meta.markdown)
@@ -499,11 +499,16 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
 
 const CHANNEL_BARREL = 'src/channels/index.ts';
 
-/** Line numbers of the copy, barrel and dependency directives a refresh skips for want of install answers. */
+/** Line numbers of the guarded copy, barrel and dependency directives the refresh checks leave out. */
 export function guardedDirectives(meta: RegistrySkill): number[] {
   return parseDirectives(meta.markdown)
     .filter((directive) => ['copy', 'append', 'dep'].includes(directive.kind) && directive.attrs.when)
     .map((directive) => directive.line);
+}
+
+/** Any barrel append, guarded or not: what update-skills attributes an installed import to. */
+function addsBarrelImport(meta: RegistrySkill): boolean {
+  return parseDirectives(meta.markdown).some((d) => d.kind === 'append' && d.attrs.to === CHANNEL_BARREL);
 }
 
 export function barrelLines(meta: RegistrySkill): string[] {
@@ -521,8 +526,7 @@ function barrelProblems(root: string, installed: RegistrySkill[]): string[] {
     .map((line) => line.trim());
   return installed.flatMap((meta) => {
     const lines = barrelLines(meta);
-    const anyImport = parseDirectives(meta.markdown).some((d) => d.kind === 'append' && d.attrs.to === CHANNEL_BARREL);
-    if (meta.channel && !anyImport) return [`${meta.skill} adds no ${CHANNEL_BARREL} import`];
+    if (meta.channel && !addsBarrelImport(meta)) return [`${meta.skill} adds no ${CHANNEL_BARREL} import`];
     return lines
       .filter((line) => barrel.filter((candidate) => candidate === line).length !== 1)
       .map((line) => `${meta.skill}: ${CHANNEL_BARREL} must hold "${line}" exactly once`);
@@ -557,14 +561,13 @@ async function channelRefreshProblems(
   installed: RegistrySkill[],
 ): Promise<string[]> {
   // update-skills finds an install through its barrel import, so it never refreshes a skill without one.
-  const visible = installed.filter((meta) => barrelLines(meta).length);
+  const visible = installed.filter(addsBarrelImport);
   for (const meta of installed.filter((candidate) => !visible.includes(candidate))) {
     console.error(`WARN: update-skills cannot refresh ${meta.skill}: it adds no ${CHANNEL_BARREL} import`);
   }
   for (const meta of visible) {
     const lines = guardedDirectives(meta);
-    if (lines.length)
-      console.error(`WARN: refresh skips ${meta.skill}'s when: directives (lines ${lines}); not checked`);
+    if (lines.length) console.error(`WARN: ${meta.skill}'s when: directives (lines ${lines}) are not checked`);
   }
   // A trailing newline changes the blob and stays valid text. Patch files are left alone: pnpm re-checks them on every add.
   for (const { dest } of visible.flatMap(copySources)) {
