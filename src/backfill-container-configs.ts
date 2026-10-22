@@ -5,9 +5,9 @@
  * Runs after migrations, before channel adapters start. Idempotent — skips
  * groups that already have a config row.
  */
-import fs from 'fs';
 import path from 'path';
 
+import { AnchoredDir } from './anchored-dir.js';
 import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig, AdditionalMountConfig } from './container-config.js';
 import { getAllAgentGroups } from './db/agent-groups.js';
@@ -34,19 +34,7 @@ export async function backfillContainerConfigs(): Promise<void> {
     // Skip if already has a config row
     if (await getContainerConfig(group.id)) continue;
 
-    // Read legacy container.json from disk
-    const filePath = path.join(GROUPS_DIR, group.folder, 'container.json');
-    let legacy: LegacyContainerJson = {};
-    if (fs.existsSync(filePath)) {
-      try {
-        legacy = JSON.parse(fs.readFileSync(filePath, 'utf8')) as LegacyContainerJson;
-      } catch (err) {
-        log.warn('Backfill: failed to parse container.json, using defaults', {
-          folder: group.folder,
-          err: String(err),
-        });
-      }
-    }
+    const legacy = readLegacyContainerJson(group.folder);
 
     // DB agent_provider wins over file provider (matches old cascade)
     const provider = group.agent_provider || legacy.provider || null;
@@ -77,4 +65,40 @@ export async function backfillContainerConfigs(): Promise<void> {
   if (backfilled > 0) {
     log.info('Backfilled container_configs from disk', { count: backfilled });
   }
+}
+
+/**
+ * The group folder is mounted read-write into the agent container, so
+ * `container.json` is read through the folder's descriptor: a symlink or
+ * any non-regular file under that name is skipped, never followed.
+ */
+function readLegacyContainerJson(folder: string): LegacyContainerJson {
+  let raw: string;
+  let dir: AnchoredDir | null = null;
+  try {
+    dir = AnchoredDir.open(path.join(GROUPS_DIR, folder), []);
+    if (!dir) return {};
+    raw = dir.readFile('container.json').toString('utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    log.warn('Backfill: legacy container.json not read (not a regular file, or unreadable), using defaults', {
+      folder,
+      code: (err as NodeJS.ErrnoException).code,
+    });
+    return {};
+  } finally {
+    dir?.close();
+  }
+  // The parse error quotes the input, so only a generic reason is logged.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    log.warn('Backfill: legacy container.json is not a JSON object, using defaults', { folder });
+    return {};
+  }
+  return parsed as LegacyContainerJson;
 }
