@@ -160,10 +160,13 @@ function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   });
 }
 
-/** Each copy destination with its source: a registry branch path, or a file in the skill directory. */
+/**
+ * Each unguarded copy destination with its source: a registry branch path, or a
+ * file in the skill directory. A `when:` copy depends on install answers, so it is not checked.
+ */
 export function copySources(meta: RegistrySkill): Array<{ dest: string; branch?: string; source: string }> {
   return parseDirectives(meta.markdown)
-    .filter((directive) => directive.kind === 'copy')
+    .filter((directive) => directive.kind === 'copy' && !directive.attrs.when)
     .flatMap((directive) =>
       directive.body.map((line) => {
         const [source, dest = source] = line.split('->').map((part) => part.trim());
@@ -496,9 +499,11 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
 
 const CHANNEL_BARREL = 'src/channels/index.ts';
 
-function barrelLines(meta: RegistrySkill): string[] {
+export function barrelLines(meta: RegistrySkill): string[] {
   return parseDirectives(meta.markdown)
-    .filter((directive) => directive.kind === 'append' && directive.attrs.to === CHANNEL_BARREL)
+    .filter(
+      (directive) => directive.kind === 'append' && directive.attrs.to === CHANNEL_BARREL && !directive.attrs.when,
+    )
     .flatMap((directive) => directive.body.map((line) => line.trim()));
 }
 
@@ -631,11 +636,14 @@ async function testCombinedChannels(skills: RegistrySkill[]): Promise<void> {
   }
 }
 
-// A conflict in these takes the new core's copy; the refresh then re-adds each adapter's pinned packages.
 const DEPENDENCY_FILES = new Set(['package.json', 'pnpm-lock.yaml']);
 const CI_GIT = ['-c', 'user.name=skill-ci', '-c', 'user.email=skill-ci@localhost', '-c', 'commit.gpgsign=false'];
 
-/** Merge the core under test into a fork the way /update-nanoclaw's default merge strategy does. */
+/**
+ * A stricter stand-in for /update-nanoclaw's default merge. The real updater stops at a
+ * conflict for a person to resolve; here a conflict in the dependency files takes the new
+ * core's copy and the refresh must restore each adapter's pins. Any other conflict fails.
+ */
 function mergeCore(root: string, core: string): void {
   git([...CI_GIT, 'add', '--all'], root);
   git([...CI_GIT, 'commit', '--quiet', '--no-verify', '-m', 'fork: installed channels'], root);
@@ -675,6 +683,8 @@ async function testOldChannelRefresh(commit: string): Promise<void> {
     await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const pick = () => discover(join(root, '.claude/skills')).filter(({ skill }) => OLD_CHANNEL_SKILLS.includes(skill));
+    // Adapters come from today's channels commit, not the one current at that release:
+    // the stale copies made before the refresh stand in for older adapter code.
     const oldSkills = pick();
     if (oldSkills.length !== OLD_CHANNEL_SKILLS.length) throw new Error('old trunk is missing a channel skill');
     for (const meta of oldSkills) {

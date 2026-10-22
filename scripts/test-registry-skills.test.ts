@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  barrelLines,
   copySources,
   dependencyProblems,
   discover,
@@ -119,7 +120,7 @@ describe('--combined-channels selection', () => {
 });
 
 describe('copy sources', () => {
-  it('names the registry blob or the skill payload file behind every copy destination', () => {
+  it('names the registry blob or the skill payload file behind every unguarded copy destination', () => {
     const meta = skill('add-gchat', [], {
       markdown: [
         '```nc:copy from-branch:channels',
@@ -128,12 +129,29 @@ describe('copy sources', () => {
         '```nc:copy',
         'payload/src/channels/gchat-registration.test.ts -> src/channels/gchat-registration.test.ts',
         '```',
+        '```nc:copy when:backend=hosted',
+        'payload/src/channels/gchat-hosted.ts -> src/channels/gchat-hosted.ts',
+        '```',
       ].join('\n'),
     });
     expect(copySources(meta)).toEqual([
       { dest: 'src/channels/gchat.ts', branch: 'channels', source: 'src/channels/gchat.ts' },
       { dest: 'src/channels/gchat-registration.test.ts', source: 'payload/src/channels/gchat-registration.test.ts' },
     ]);
+  });
+
+  it('leaves out barrel imports that depend on install answers', () => {
+    const meta = skill('add-imessage', [], {
+      markdown: [
+        '```nc:append to:src/channels/index.ts',
+        "import './imessage.js';",
+        '```',
+        '```nc:append to:src/channels/index.ts when:backend=hosted',
+        "import './imessage-hosted.js';",
+        '```',
+      ].join('\n'),
+    });
+    expect(barrelLines(meta)).toEqual(["import './imessage.js';"]);
   });
 });
 
