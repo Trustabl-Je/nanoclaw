@@ -182,6 +182,30 @@ describe('CodexProvider active turns', () => {
     ]);
   });
 
+  it('counts a steer still unanswered after the wait as folded, without holding the result', async () => {
+    const fake = createFakeCodexRuntime({ steerReply: () => new Promise<void>(() => {}), steerReplyWaitMs: 50 });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('unanswered steer');
+    await waitFor(() => fake.steerCalls.length === 1);
+    fake.completeTurn('first answer');
+    await waitFor(() => events.some((event) => event.type === 'result'));
+    query.end();
+
+    await collect;
+
+    // An uncounted fold would leave every later reply one behind; a wrong
+    // count costs one reply if the steer is rejected later.
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer', answeredInputs: 2 },
+    ] as ProviderEvent[]);
+  });
+
   it('stops promptly on abort while a result waits for a steer reply', async () => {
     const fake = createFakeCodexRuntime({ steerReply: () => new Promise<void>(() => {}) });
     const provider = createCodexProvider({}, fake.runtime);
@@ -355,7 +379,12 @@ describe('CodexProvider active turns', () => {
 });
 
 function createFakeCodexRuntime(
-  opts: { rejectSteer?: boolean; threadReady?: Promise<void>; steerReply?: () => Promise<void> } = {},
+  opts: {
+    rejectSteer?: boolean;
+    threadReady?: Promise<void>;
+    steerReply?: () => Promise<void>;
+    steerReplyWaitMs?: number;
+  } = {},
 ) {
   const server = fakeServer();
   const startCalls: TurnParams[] = [];
@@ -394,6 +423,7 @@ function createFakeCodexRuntime(
     killCodexAppServer: () => {
       killed = true;
     },
+    steerReplyWaitMs: opts.steerReplyWaitMs,
   };
 
   return {
