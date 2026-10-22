@@ -5,9 +5,9 @@
  * Runs after migrations, before channel adapters start. Idempotent — skips
  * groups that already have a config row.
  */
+import fs from 'fs';
 import path from 'path';
 
-import { AnchoredDir } from './anchored-dir.js';
 import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig, AdditionalMountConfig } from './container-config.js';
 import { getAllAgentGroups } from './db/agent-groups.js';
@@ -68,26 +68,43 @@ export async function backfillContainerConfigs(): Promise<void> {
 }
 
 /**
- * The group folder is mounted read-write into the agent container, so
- * `container.json` is read through the folder's descriptor: a symlink or
- * any non-regular file under that name is skipped, never followed.
+ * Read a legacy `container.json`. The group folder is a host-owned mount
+ * source the container cannot swap; only the leaf name is container-controlled,
+ * so a no-follow open of the leaf (O_NONBLOCK so a planted FIFO can't block)
+ * refuses a symlink or special file on any volume. The leaf must be a regular
+ * file; anything else is skipped with a warning.
  */
 function readLegacyContainerJson(folder: string): LegacyContainerJson {
-  let raw: string;
-  let dir: AnchoredDir | null = null;
+  const file = path.join(GROUPS_DIR, folder, 'container.json');
+  const skipped = (code?: string): LegacyContainerJson => {
+    log.warn(
+      'Backfill: legacy container.json is not a regular file or is unreadable; its settings were NOT imported. ' +
+        'Re-add them with the `ncl groups config` commands (update, add-mcp-server, add-package).',
+      { folder, code },
+    );
+    return {};
+  };
+  let fd: number;
   try {
-    dir = AnchoredDir.open(path.join(GROUPS_DIR, folder), []);
-    if (!dir) return {};
-    raw = dir.readFile('container.json').toString('utf8');
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    log.warn('Backfill: legacy container.json not read (not a regular file, or unreadable), using defaults', {
-      folder,
-      code: (err as NodeJS.ErrnoException).code,
-    });
-    return {};
+    return skipped((err as NodeJS.ErrnoException).code);
+  }
+  let raw: string;
+  try {
+    if (!fs.fstatSync(fd).isFile()) return skipped('ENOTREG');
+    raw = fs.readFileSync(fd, 'utf8');
+  } catch (err) {
+    // A stat/read failure (e.g. EIO) degrades to defaults, never aborts startup.
+    return skipped((err as NodeJS.ErrnoException).code);
   } finally {
-    dir?.close();
+    // A close-time error must not abort startup either — the result is already decided.
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* ignore */
+    }
   }
   // The parse error quotes the input, so only a generic reason is logged.
   let parsed: unknown;
@@ -97,7 +114,9 @@ function readLegacyContainerJson(folder: string): LegacyContainerJson {
     parsed = undefined;
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    log.warn('Backfill: legacy container.json is not a JSON object, using defaults', { folder });
+    log.warn('Backfill: legacy container.json is not a JSON object; its settings were NOT imported, using defaults', {
+      folder,
+    });
     return {};
   }
   return parsed as LegacyContainerJson;

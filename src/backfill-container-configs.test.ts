@@ -101,16 +101,22 @@ describe('backfillContainerConfigs legacy container.json', () => {
     expect(log.warn).toHaveBeenCalled();
   });
 
-  it('keeps file content out of the parse warning and tolerates non-object JSON', async () => {
+  it('keeps file content out of the parse warning', async () => {
     const bad = await legacyGroup('bad');
     fs.writeFileSync(bad, 'secret-looking-text');
+
+    await backfillContainerConfigs();
+
+    expectDefaults(await getContainerConfig('ag-bad'));
+    expect(JSON.stringify(vi.mocked(log.warn).mock.calls)).not.toContain('secret-looking');
+  });
+
+  it('tolerates non-object JSON without crashing startup', async () => {
     const nil = await legacyGroup('nil');
     fs.writeFileSync(nil, 'null');
 
     await backfillContainerConfigs();
 
-    expectDefaults(await getContainerConfig('ag-bad'));
     expectDefaults(await getContainerConfig('ag-nil'));
-    expect(JSON.stringify(vi.mocked(log.warn).mock.calls)).not.toContain('secret-looking');
   });
 });
