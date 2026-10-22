@@ -647,4 +647,31 @@ describe('delivery deadline', () => {
 
     expect(await getDb().get('SELECT 1 FROM delivery_attempts WHERE message_id = ?', 'out-w')).toBeUndefined();
   });
+  it("a parked retry's give-up after the original landed leaves no attempt row behind", async () => {
+    insertOutbound(session, 'out-v');
+    const original = deferred<string>();
+    recordingAdapter((text, call) => (call === 1 ? original.promise : new Promise<string>(() => {})));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GIVE_UP_MS);
+    await drain.promise;
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+
+    const second = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await second.promise;
+    original.resolve('pm-original');
+    await vi.waitFor(() => expect(deliveredRow(session, 'out-v')?.status).toBe('delivered'));
+
+    // The parked retry never settles, so its own give-up fires later.
+    await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () =>
+      expect(await getDb().get('SELECT 1 FROM delivery_attempts WHERE message_id = ?', 'out-v')).toBeUndefined(),
+    );
+    expect(deliveredRow(session, 'out-v')).toEqual({ status: 'delivered', platform_message_id: 'pm-original' });
+  });
 });

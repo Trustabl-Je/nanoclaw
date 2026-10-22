@@ -398,9 +398,7 @@ async function drainSession(session: Session): Promise<void> {
         await completeDelivery(msg, session, agentGroup, await send, lateSendOut ? null : delivered.size === 0);
         delivered.add(msg.id);
       } catch (err) {
-        // A given-up original may have landed meanwhile; its record stands.
-        if (lateSendOut && (await alreadyRecorded(agentGroup, session, msg.id))) continue;
-        await failDelivery(msg, session, agentGroup, err);
+        await failDelivery(msg, session, agentGroup, err, lateSendOut);
       }
     }
   } finally {
@@ -461,6 +459,7 @@ async function completeDelivery(
   });
   if (recorded) {
     // Delivered by the other send, or already marked failed: keep that record.
+    await clearAttemptRow(msg.id);
     log.warn('Send landed for a row already recorded, keeping the first record', {
       messageId: msg.id,
       sessionId: session.id,
@@ -497,14 +496,28 @@ async function completeDelivery(
   }
 }
 
-/** A send failed: count the attempt; give up on the row at MAX_DELIVERY_ATTEMPTS. Never throws. */
+/**
+ * A send failed: count the attempt; give up on the row at MAX_DELIVERY_ATTEMPTS.
+ * `checkRecorded` (another send of the row may land): check after counting,
+ * and undo the count if the row is recorded. Success marks then clears, so
+ * this order leaves no stale count either way. Never throws.
+ */
 async function failDelivery(
   msg: OutboundMessage,
   session: Session,
   agentGroup: AgentGroup,
   err: unknown,
+  checkRecorded = false,
 ): Promise<void> {
   const attempts = await recordAttemptRow(msg.id, session.id, err);
+  if (checkRecorded && (await alreadyRecorded(agentGroup, session, msg.id))) {
+    await clearAttemptRow(msg.id);
+    log.info('Send failed for a row already recorded, keeping that record', {
+      messageId: msg.id,
+      sessionId: session.id,
+    });
+    return;
+  }
   if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
     log.error('Message delivery failed permanently, giving up', {
       messageId: msg.id,
@@ -570,7 +583,7 @@ function parkOverdueDelivery(
       sessionId: session.id,
       giveUpMs: OVERDUE_GIVE_UP_MS,
     });
-    void failDelivery(msg, session, agentGroup, new Error(`send did not settle within ${OVERDUE_GIVE_UP_MS} ms`))
+    void failDelivery(msg, session, agentGroup, new Error(`send did not settle within ${OVERDUE_GIVE_UP_MS} ms`), true)
       .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
       .finally(() => overdueDeliveries.delete(key));
   }, OVERDUE_GIVE_UP_MS);
@@ -583,16 +596,7 @@ function parkOverdueDelivery(
       () => log.info('Overdue message delivery landed', { messageId: msg.id, sessionId: session.id }),
       async (err) => {
         // After a give-up this attempt is already counted.
-        if (gaveUp) return;
-        // A retry of a given-up row: the original may have landed meanwhile.
-        if (await alreadyRecorded(agentGroup, session, msg.id)) {
-          log.info('Overdue send failed for a row already recorded, keeping that record', {
-            messageId: msg.id,
-            sessionId: session.id,
-          });
-          return;
-        }
-        await failDelivery(msg, session, agentGroup, err);
+        if (!gaveUp) await failDelivery(msg, session, agentGroup, err, true);
       },
     )
     .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
