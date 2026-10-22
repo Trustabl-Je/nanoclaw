@@ -8,6 +8,7 @@ import {
   copySources,
   dependencyProblems,
   discover,
+  guardedDirectives,
   formatUnavailable,
   matrixSkills,
   missingRegistrySources,
@@ -120,7 +121,7 @@ describe('--combined-channels selection', () => {
 });
 
 describe('copy sources', () => {
-  it('names the source behind every copy an install with these answers applied', () => {
+  it('names the registry blob or the skill payload file behind every unguarded copy destination', () => {
     const meta = skill('add-gchat', [], {
       markdown: [
         '```nc:copy from-branch:channels',
@@ -134,18 +135,13 @@ describe('copy sources', () => {
         '```',
       ].join('\n'),
     });
-    const base = [
+    expect(copySources(meta)).toEqual([
       { dest: 'src/channels/gchat.ts', branch: 'channels', source: 'src/channels/gchat.ts' },
       { dest: 'src/channels/gchat-registration.test.ts', source: 'payload/src/channels/gchat-registration.test.ts' },
-    ];
-    expect(copySources(meta)).toEqual(base);
-    expect(copySources(meta, { backend: 'hosted' })).toEqual([
-      ...base,
-      { dest: 'src/channels/gchat-hosted.ts', source: 'payload/src/channels/gchat-hosted.ts' },
     ]);
   });
 
-  it('counts a guarded barrel import only when the install answers meet its guard', () => {
+  it('leaves out, and names, barrel imports that depend on install answers', () => {
     const meta = skill('add-imessage', [], {
       markdown: [
         '```nc:append to:src/channels/index.ts',
@@ -156,16 +152,14 @@ describe('copy sources', () => {
         '```',
       ].join('\n'),
     });
-    expect(barrelLines(meta, { backend: 'local' })).toEqual(["import './imessage.js';"]);
-    expect(barrelLines(meta, { backend: 'hosted' })).toEqual([
-      "import './imessage.js';",
-      "import './imessage-hosted.js';",
-    ]);
+    expect(barrelLines(meta)).toEqual(["import './imessage.js';"]);
+    // A refresh has no install answers, so the job names the guarded one instead of checking it.
+    expect(guardedDirectives(meta)).toEqual([4]);
   });
 });
 
 describe('dependency pins after a refresh', () => {
-  it('names each applied nc:dep pin its package.json does not hold exactly', () => {
+  it('names each unguarded nc:dep pin its package.json does not hold exactly', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dependency-pins-'));
     try {
       const pkg = { dependencies: { qrcode: '1.5.4', pino: '^9.6.0' }, devDependencies: { qrcode: '1.5.3' } };
@@ -182,15 +176,10 @@ describe('dependency pins after a refresh', () => {
           '```',
         ].join('\n'),
       });
-      const unguarded = [
+      expect(dependencyProblems(root, meta)).toEqual([
         'add-whatsapp: package.json lacks qrcode@1.5.4',
         'add-whatsapp: package.json lacks pino@9.6.0',
         'add-whatsapp: package.json lacks @whiskeysockets/baileys@7.0.0-rc14',
-      ];
-      expect(dependencyProblems(root, meta)).toEqual(unguarded);
-      expect(dependencyProblems(root, meta, { backend: 'hosted' })).toEqual([
-        ...unguarded,
-        'add-whatsapp: package.json lacks spectrum-ts@11.0.0',
       ]);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

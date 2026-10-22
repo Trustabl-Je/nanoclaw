@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { applySkill, fullyApplied, removeSkill, whenMet } from './skill-apply.js';
+import { applySkill, fullyApplied, removeSkill } from './skill-apply.js';
 import {
   lintGateAmbiguity,
   lintReferenceFloor,
@@ -160,21 +160,13 @@ function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   });
 }
 
-/** The directives an install with these answers applies: unguarded ones, and each `when:` the answers meet. */
-function appliedDirectives(meta: RegistrySkill, inputs: Record<string, string>) {
-  const vars = new Map(Object.entries(inputs).map(([name, value]) => [name, { value, secret: false }]));
-  return parseDirectives(meta.markdown).filter(
-    (directive) => typeof directive.attrs.when !== 'string' || whenMet(directive.attrs.when, vars),
-  );
-}
-
-/** Each applied copy destination with its source: a registry branch path, or a file in the skill directory. */
-export function copySources(
-  meta: RegistrySkill,
-  inputs: Record<string, string> = {},
-): Array<{ dest: string; branch?: string; source: string }> {
-  return appliedDirectives(meta, inputs)
-    .filter((directive) => directive.kind === 'copy')
+/**
+ * Each copy a refresh re-applies, with its source: a registry branch path, or a file
+ * in the skill directory. A refresh has no install answers, so it skips `when:` copies.
+ */
+export function copySources(meta: RegistrySkill): Array<{ dest: string; branch?: string; source: string }> {
+  return parseDirectives(meta.markdown)
+    .filter((directive) => directive.kind === 'copy' && !directive.attrs.when)
     .flatMap((directive) =>
       directive.body.map((line) => {
         const [source, dest = source] = line.split('->').map((part) => part.trim());
@@ -242,11 +234,6 @@ function fixtureScenarios(meta: RegistrySkill): FixtureScenario[] {
   if (!existsSync(path)) return [{}];
   const fixture = JSON.parse(readFileSync(path, 'utf8')) as Fixture;
   return fixture.scenarios?.length ? fixture.scenarios : [{}];
-}
-
-/** The answers the combined and old-host installs use: the first fixture scenario's. */
-function installInputs(meta: RegistrySkill): Record<string, string> {
-  return fixtureScenarios(meta)[0]?.inputs ?? {};
 }
 
 function resolveRegistryRefs(): Record<string, string> {
@@ -512,9 +499,18 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
 
 const CHANNEL_BARREL = 'src/channels/index.ts';
 
-export function barrelLines(meta: RegistrySkill, inputs: Record<string, string> = {}): string[] {
-  return appliedDirectives(meta, inputs)
-    .filter((directive) => directive.kind === 'append' && directive.attrs.to === CHANNEL_BARREL)
+/** Line numbers of the copy, barrel and dependency directives a refresh skips for want of install answers. */
+export function guardedDirectives(meta: RegistrySkill): number[] {
+  return parseDirectives(meta.markdown)
+    .filter((directive) => ['copy', 'append', 'dep'].includes(directive.kind) && directive.attrs.when)
+    .map((directive) => directive.line);
+}
+
+export function barrelLines(meta: RegistrySkill): string[] {
+  return parseDirectives(meta.markdown)
+    .filter(
+      (directive) => directive.kind === 'append' && directive.attrs.to === CHANNEL_BARREL && !directive.attrs.when,
+    )
     .flatMap((directive) => directive.body.map((line) => line.trim()));
 }
 
@@ -524,18 +520,19 @@ function barrelProblems(root: string, installed: RegistrySkill[]): string[] {
     .split('\n')
     .map((line) => line.trim());
   return installed.flatMap((meta) => {
-    const lines = barrelLines(meta, installInputs(meta));
-    if (meta.channel && !lines.length) return [`${meta.skill} adds no ${CHANNEL_BARREL} import`];
+    const lines = barrelLines(meta);
+    const anyImport = parseDirectives(meta.markdown).some((d) => d.kind === 'append' && d.attrs.to === CHANNEL_BARREL);
+    if (meta.channel && !anyImport) return [`${meta.skill} adds no ${CHANNEL_BARREL} import`];
     return lines
       .filter((line) => barrel.filter((candidate) => candidate === line).length !== 1)
       .map((line) => `${meta.skill}: ${CHANNEL_BARREL} must hold "${line}" exactly once`);
   });
 }
 
-/** Each applied nc:dep pin is in its package.json exactly, so a later install-mode apply cannot be what adds it. */
-export function dependencyProblems(root: string, meta: RegistrySkill, inputs: Record<string, string> = {}): string[] {
-  return appliedDirectives(meta, inputs)
-    .filter((directive) => directive.kind === 'dep')
+/** Each unguarded nc:dep pin is in its package.json exactly, so a later install-mode apply cannot be what adds it. */
+export function dependencyProblems(root: string, meta: RegistrySkill): string[] {
+  return parseDirectives(meta.markdown)
+    .filter((directive) => directive.kind === 'dep' && !directive.attrs.when)
     .flatMap((directive) => {
       const file = join(typeof directive.attrs.cwd === 'string' ? directive.attrs.cwd : '', 'package.json');
       const pkg = JSON.parse(readFileSync(join(root, file), 'utf8')) as Record<string, Record<string, string>>;
@@ -560,12 +557,17 @@ async function channelRefreshProblems(
   installed: RegistrySkill[],
 ): Promise<string[]> {
   // update-skills finds an install through its barrel import, so it never refreshes a skill without one.
-  const visible = installed.filter((meta) => barrelLines(meta, installInputs(meta)).length);
+  const visible = installed.filter((meta) => barrelLines(meta).length);
   for (const meta of installed.filter((candidate) => !visible.includes(candidate))) {
     console.error(`WARN: update-skills cannot refresh ${meta.skill}: it adds no ${CHANNEL_BARREL} import`);
   }
+  for (const meta of visible) {
+    const lines = guardedDirectives(meta);
+    if (lines.length)
+      console.error(`WARN: refresh skips ${meta.skill}'s when: directives (lines ${lines}); not checked`);
+  }
   // A trailing newline changes the blob and stays valid text. Patch files are left alone: pnpm re-checks them on every add.
-  for (const { dest } of visible.flatMap((meta) => copySources(meta, installInputs(meta)))) {
+  for (const { dest } of visible.flatMap(copySources)) {
     if (!dest.endsWith('.patch') && existsSync(join(root, dest))) appendFileSync(join(root, dest), '\n');
   }
   pinRegistryRef(root, 'channels', refs.channels);
@@ -583,7 +585,7 @@ async function channelRefreshProblems(
       .map((skill) => `update-skills could not refresh ${skill.skillName}: ${skill.errors.join('; ')}`),
   ];
   for (const meta of visible) {
-    for (const { dest, branch, source } of copySources(meta, installInputs(meta))) {
+    for (const { dest, branch, source } of copySources(meta)) {
       const want = branch ? git(['rev-parse', `${refs[branch]}:${source}`], root) : hashFile(join(meta.dir, source));
       if (hashFile(join(root, dest)) !== want) {
         problems.push(`${meta.skill}: ${dest} differs from ${branch ?? meta.skill}:${source}`);
@@ -593,7 +595,7 @@ async function channelRefreshProblems(
   return [
     ...problems,
     ...barrelProblems(root, installed),
-    ...installed.flatMap((meta) => dependencyProblems(root, meta, installInputs(meta))),
+    ...installed.flatMap((meta) => dependencyProblems(root, meta)),
   ];
 }
 

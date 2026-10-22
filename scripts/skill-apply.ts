@@ -598,7 +598,7 @@ function substitute(value: string, vars: Map<string, { value: string; secret: bo
 // unresolved (a deferred prompt) — skips the directive, so a guarded prompt is
 // skipped, never deferred. This is how a skill expresses mutually-exclusive
 // branches (e.g. local vs remote install mode) in plain document order.
-export function whenMet(when: string, vars: Map<string, { value: string; secret: boolean }>): boolean {
+function whenMet(when: string, vars: Map<string, { value: string; secret: boolean }>): boolean {
   const eq = when.indexOf('=');
   if (eq < 1) return true; // malformed → don't block (lint is the gate)
   return vars.get(when.slice(0, eq).trim())?.value === when.slice(eq + 1).trim();
