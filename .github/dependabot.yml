@@ -1,14 +1,11 @@
-# Keeps the SHA-pinned GitHub Actions current. Weekly; minor and patch
-# updates come as one grouped PR, each major alone. Nothing merges itself:
-# bump PRs run the same CI and need the same review as any other PR. A new
-# release waits 7 days before it is proposed, as a guard against a bad one.
-# Dependabot moves the pinned SHA and its version comment together.
-#
-# Skill-pinned npm versions are covered through /.github/skill-pins. The
-# root pnpm and bun lockfiles are not covered yet; that is a separate decision.
+# Weekly version-update PRs; nothing merges itself. Minor and patch updates
+# come grouped, each major alone. A cooldown holds new releases back as a guard
+# against a bad or malicious publish: 7 days, 14 for majors. On npm, Dependabot
+# also applies it to transitive versions, on top of pnpm's 3-day gate.
 version: 2
 
 updates:
+  # Moves each pinned SHA and its version comment together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -16,14 +13,87 @@ updates:
       day: monday
       time: "06:00" # UTC, Dependabot's default timezone
     cooldown:
-      default-days: 7
+      default-days: 7 # actions take no per-semver cooldown
     groups:
       actions-minor-patch:
         update-types: [minor, patch]
+    labels: [dependencies]
     commit-message:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+
+  # The host's pnpm project (pnpm-lock.yaml).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      dev-minor-patch:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # Moves only in a Chat SDK upgrade, with the @chat-adapter/* skill pins
+      # (skill-directives lint). Also stops security-update PRs for it.
+      - dependency-name: chat
+      # Typings follow the Node floor (engines >=22), not the newest Node.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    labels: [dependencies, javascript]
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+
+  # The agent runner (bun.lock). The agent image bakes this lockfile, so after a
+  # bump, installs on the pinned image warn about lock drift until the next
+  # release image. Bun groups take no dependency-type.
+  - package-ecosystem: bun
+    directory: /container/agent-runner
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      agent-runner-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    labels: [dependencies, javascript]
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 3
+
+  # The agent image's base (container/Dockerfile FROM). Tracked only when FROM
+  # is pinned as `node:<x.y.z>-slim@sha256:...`; a floating `22-slim` gets no
+  # PRs. Base-image patches are often security fixes, so the cooldown is the
+  # 3-day floor. A Node major is a deliberate move (engines, CI matrix).
+  - package-ecosystem: docker
+    directory: /container
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    cooldown:
+      default-days: 3
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+    labels: [dependencies]
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 2
 
   # Skill-pinned npm versions, mirrored by `pnpm run skill-pins:generate`.
   # A bump only edits the shadow file; CI's skill-pins check then fails until
@@ -33,9 +103,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "06:00" # UTC, Dependabot's default timezone
+      time: "06:00"
     cooldown:
       default-days: 7
+      semver-major-days: 14
     groups:
       skill-pins-minor-patch:
         update-types: [minor, patch]
@@ -44,6 +115,7 @@ updates:
       # upgrades move them. This also stops security-update PRs for them;
       # their advisories still show as Dependabot alerts.
       - dependency-name: "@chat-adapter/*"
+    labels: [dependencies, javascript]
     commit-message:
       prefix: chore
       include: scope
