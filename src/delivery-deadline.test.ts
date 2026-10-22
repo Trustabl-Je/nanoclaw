@@ -28,10 +28,11 @@ vi.mock('./config.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-delivery-deadline';
 const DEADLINE_MS = 60_000; // DELIVERY_DEADLINE_MS in delivery.ts
 const GIVE_UP_MS = 60 * 60_000; // OVERDUE_GIVE_UP_MS in delivery.ts
+const TICK_WAIT_MS = 5_000; // TICK_DRAIN_WAIT_MS in delivery.ts
 
 import { closeDb, createAgentGroup, createMessagingGroup, initTestDb, runMigrations } from './db/index.js';
 import {
-  _resetOverdueDeliveriesForTesting,
+  _resetDeliveryStateForTesting,
   deliverSessionMessages,
   deliverToSessions,
   registerDeliveryAction,
@@ -133,7 +134,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
-  _resetOverdueDeliveriesForTesting();
+  _resetDeliveryStateForTesting();
   await closeDb();
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });
@@ -412,5 +413,148 @@ describe('delivery deadline', () => {
     await deliverSessionMessages(session);
     await deliverSessionMessages(session);
     expect(runs).toBe(1);
+  });
+
+  it('a slow system action (an image rebuild) is parked without a stuck-send warning and runs once', async () => {
+    let runs = 0;
+    registerDeliveryAction(
+      'test_slow_build',
+      async () => {
+        runs++;
+        await new Promise((resolve) => setTimeout(resolve, 5 * 60_000));
+      },
+      unguarded('test fixture'),
+    );
+    insertOutbound(session, 'out-build', 'system', { action: 'test_slow_build' });
+    setDeliveryAdapter({ deliver: async () => 'pm' });
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await drain.promise;
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('still running'),
+      expect.objectContaining({ messageId: 'out-build', sessionId: session.id }),
+    );
+
+    await deliverSessionMessages(session);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - DEADLINE_MS);
+    await vi.waitFor(() => expect(deliveredRow(session, 'out-build')?.status).toBe('delivered'));
+    expect(runs).toBe(1);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('deadline'), expect.anything());
+  });
+
+  it('a hung channel does not hold the poll tick: other sessions keep their cadence', async () => {
+    const { session: hungB } = await resolveSession('ag-1', 'mg-1', 'thread-hung-b', 'per-thread');
+    const { session: healthy } = await resolveSession('ag-1', 'mg-1', 'thread-ok', 'per-thread');
+    insertOutbound(session, 'out-hung-a');
+    insertOutbound(hungB, 'out-hung-b');
+    insertOutbound(healthy, 'out-ok-1');
+    const calls = recordingAdapter((text) => (text.startsWith('out-hung') ? new Promise<string>(() => {}) : undefined));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    const tick = track(deliverToSessions([session, hungB, healthy]));
+    await vi.advanceTimersByTimeAsync(TICK_WAIT_MS);
+    expect(tick.done()).toBe(true);
+    expect(deliveredRow(healthy, 'out-ok-1')?.status).toBe('delivered');
+
+    // The hung drains still run and still own their sessions, so the next
+    // tick skips them instead of sending again, and the healthy reply goes out.
+    insertOutbound(healthy, 'out-ok-2');
+    await deliverToSessions([session, hungB, healthy]);
+    expect(deliveredRow(healthy, 'out-ok-2')?.status).toBe('delivered');
+    expect(calls.filter((text) => text.startsWith('out-hung')).sort()).toEqual(['out-hung-a', 'out-hung-b']);
+  });
+
+  it('drains handed to the background are capped, so sends in flight stay bounded', async () => {
+    const sessions = [session];
+    for (let i = 1; i < 17; i++) {
+      sessions.push((await resolveSession('ag-1', 'mg-1', `thread-slow-${i}`, 'per-thread')).session);
+    }
+    sessions.forEach((s, i) => insertOutbound(s, `out-slow-${i}`));
+    let inFlight = 0;
+    let peak = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        inFlight--;
+        return 'pm';
+      },
+    });
+
+    const tick = track(deliverToSessions(sessions));
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(tick.done()).toBe(true);
+    // Eight awaited by the tick plus eight in the background (CONCURRENCY each).
+    expect(peak).toBe(16);
+  });
+
+  it('after a give-up, the retry and the original landing follow through once (retry first)', async () => {
+    insertOutbound(session, 'out-x');
+    const original = deferred<string>();
+    recordingAdapter((text, call) => (text === 'out-x' && call === 1 ? original.promise : undefined));
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const seen: string[] = [];
+    registerPostDeliveryHook((msg, hookSession) => {
+      if (hookSession.id === session.id) seen.push(msg.id);
+    });
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GIVE_UP_MS);
+    await drain.promise;
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('never settled'), expect.anything()),
+    );
+
+    await deliverSessionMessages(session);
+    expect(deliveredRow(session, 'out-x')).toEqual({ status: 'delivered', platform_message_id: 'pm-out-x' });
+    expect(seen).toEqual(['out-x']);
+
+    original.resolve('pm-original');
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('already recorded'),
+        expect.objectContaining({ messageId: 'out-x' }),
+      ),
+    );
+    expect(seen).toEqual(['out-x']);
+    expect(deliveredRow(session, 'out-x')).toEqual({ status: 'delivered', platform_message_id: 'pm-out-x' });
+  });
+
+  it('after a give-up, the retry and the original landing follow through once (original first)', async () => {
+    insertOutbound(session, 'out-y');
+    const original = deferred<string>();
+    const retry = deferred<string>();
+    const calls = recordingAdapter((text, call) => {
+      if (text !== 'out-y') return undefined;
+      return call === 1 ? original.promise : retry.promise;
+    });
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const seen: string[] = [];
+    registerPostDeliveryHook((msg, hookSession) => {
+      if (hookSession.id === session.id) seen.push(msg.id);
+    });
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GIVE_UP_MS);
+    await drain.promise;
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('never settled'), expect.anything()),
+    );
+
+    const second = track(deliverSessionMessages(session));
+    await vi.waitFor(() => expect(calls).toEqual(['out-y', 'out-y']));
+    original.resolve('pm-original');
+    await vi.waitFor(() => expect(seen).toEqual(['out-y']));
+    retry.resolve('pm-retry');
+    await second.promise;
+
+    expect(seen).toEqual(['out-y']);
+    expect(deliveredRow(session, 'out-y')).toEqual({ status: 'delivered', platform_message_id: 'pm-original' });
   });
 });
