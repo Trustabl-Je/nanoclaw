@@ -73,6 +73,12 @@ const TICK_DRAIN_WAIT_MS = 5_000;
  * 5-minute timeouts, so only a send with no bound at all gets this far.
  */
 const OVERDUE_GIVE_UP_MS = 60 * 60_000;
+/**
+ * Parked sends one session may have at once. Past it the session sends
+ * nothing until one settles or is given up on, so a dead channel holds a
+ * few sends per session instead of one more every deadline.
+ */
+const MAX_PARKED_PER_SESSION = 3;
 
 /**
  * Attempt counts live in the `delivery_attempts` table, so they survive a
@@ -154,7 +160,7 @@ function overdueKey(sessionId: string, messageId: string): string {
  * Drains a tick stopped waiting on (see TICK_DRAIN_WAIT_MS), shared by both
  * polls. Capped at DELIVERY_CONCURRENCY, so drains in flight stay bounded:
  * each poll's DELIVERY_CONCURRENCY plus this many. Past the cap a tick waits
- * on its drains as before.
+ * on its drains, about two deadlines at most (see the drain's row budget).
  */
 const backgroundDrains = new Set<Promise<void>>();
 
@@ -328,6 +334,8 @@ async function drainSession(session: Session): Promise<void> {
   // delivered or parked, never as neither.
   const parked = new Set(overdueDeliveries);
   const lateSendOut = (unsettledLateSends.get(session.id) ?? 0) > 0;
+  const sessionPrefix = overdueKey(session.id, '');
+  if ([...parked].filter((key) => key.startsWith(sessionPrefix)).length >= MAX_PARKED_PER_SESSION) return;
 
   // Read the queue in one short mailbox session, then deliver with NO
   // session held open: delivery handlers (agent-to-agent routing, approval
@@ -369,21 +377,42 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
-  for (const msg of pending) {
-    const send = deliverMessage(msg, session);
-    if (!(await settlesWithin(send, DELIVERY_DEADLINE_MS))) {
-      parkOverdueDelivery(msg, session, agentGroup, send);
-      // Later rows wait for the next tick, so a stuck channel costs this
-      // session one deadline per tick at most.
-      return;
+  // No new row starts after one deadline, so a drain (and a tick waiting on
+  // it) lasts about two deadlines at most; the rest go next tick.
+  let budgetSpent = false;
+  const budget = setTimeout(() => {
+    budgetSpent = true;
+  }, DELIVERY_DEADLINE_MS);
+  try {
+    for (const msg of pending) {
+      if (budgetSpent) return;
+      const send = deliverMessage(msg, session);
+      if (!(await settlesWithin(send, DELIVERY_DEADLINE_MS))) {
+        parkOverdueDelivery(msg, session, agentGroup, send);
+        // Later rows wait for the next tick, so a stuck channel costs this
+        // session one deadline per tick at most.
+        return;
+      }
+      try {
+        await completeDelivery(msg, session, agentGroup, await send, lateSendOut ? null : delivered.size === 0);
+        delivered.add(msg.id);
+      } catch (err) {
+        // A given-up original may have landed meanwhile; its record stands.
+        if (lateSendOut && (await alreadyRecorded(agentGroup, session, msg.id))) continue;
+        await failDelivery(msg, session, agentGroup, err);
+      }
     }
-    try {
-      await completeDelivery(msg, session, agentGroup, await send, lateSendOut ? null : delivered.size === 0);
-      delivered.add(msg.id);
-    } catch (err) {
-      await failDelivery(msg, session, agentGroup, err);
-    }
+  } finally {
+    clearTimeout(budget);
   }
+}
+
+/** True when the row is already marked delivered or failed. False if the mailbox can't say. */
+async function alreadyRecorded(agentGroup: AgentGroup, session: Session, messageId: string): Promise<boolean> {
+  const recorded = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
+    mailbox.getDeliveredIds().has(messageId),
+  ).catch(() => false);
+  return recorded ?? false;
 }
 
 /** True when `promise` settles, either way, within `ms`. Never rejects. */

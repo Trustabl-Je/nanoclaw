@@ -29,7 +29,9 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery-deadline';
 const DEADLINE_MS = 60_000; // DELIVERY_DEADLINE_MS in delivery.ts
 const GIVE_UP_MS = 60 * 60_000; // OVERDUE_GIVE_UP_MS in delivery.ts
 const TICK_WAIT_MS = 5_000; // TICK_DRAIN_WAIT_MS in delivery.ts
+const MAX_PARKED = 3; // MAX_PARKED_PER_SESSION in delivery.ts
 
+import { getDb } from './db/connection.js';
 import { closeDb, createAgentGroup, createMessagingGroup, initTestDb, runMigrations } from './db/index.js';
 import {
   _resetDeliveryStateForTesting,
@@ -556,5 +558,61 @@ describe('delivery deadline', () => {
 
     expect(seen).toEqual(['out-y']);
     expect(deliveredRow(session, 'out-y')).toEqual({ status: 'delivered', platform_message_id: 'pm-original' });
+  });
+  it('a session stops sending once it has MAX_PARKED_PER_SESSION sends parked', async () => {
+    for (let i = 0; i < MAX_PARKED + 2; i++) insertOutbound(session, `out-dead-${i}`);
+    const calls = recordingAdapter(() => new Promise<string>(() => {}));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    for (let tick = 0; tick < MAX_PARKED + 2; tick++) {
+      const drain = track(deliverSessionMessages(session));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      await drain.promise;
+    }
+    expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2']);
+  });
+
+  it('a drain stops starting new rows after one deadline, so a tick at the cap waits about two at most', async () => {
+    insertOutbound(session, 'out-s1');
+    insertOutbound(session, 'out-s2');
+    insertOutbound(session, 'out-s3');
+    const calls = recordingAdapter(
+      () => new Promise<string>((resolve) => setTimeout(() => resolve('pm'), DEADLINE_MS - 1_000)),
+    );
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(2 * DEADLINE_MS);
+    expect(drain.done()).toBe(true);
+    expect(calls).toEqual(['out-s1', 'out-s2']);
+
+    const next = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await next.promise;
+    expect(calls).toEqual(['out-s1', 'out-s2', 'out-s3']);
+  });
+
+  it('a retry that fails after the original landed leaves no attempt row behind', async () => {
+    insertOutbound(session, 'out-z');
+    const original = deferred<string>();
+    const retry = deferred<string>();
+    const calls = recordingAdapter((text, call) => (call === 1 ? original.promise : retry.promise));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    const drain = track(deliverSessionMessages(session));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GIVE_UP_MS);
+    await drain.promise;
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('never settled'), expect.anything()),
+    );
+
+    const second = track(deliverSessionMessages(session));
+    await vi.waitFor(() => expect(calls).toEqual(['out-z', 'out-z']));
+    original.resolve('pm-original');
+    await vi.waitFor(() => expect(deliveredRow(session, 'out-z')?.status).toBe('delivered'));
+    retry.reject(new Error('retry failed'));
+    await second.promise;
+
+    expect(await getDb().get('SELECT 1 FROM delivery_attempts WHERE message_id = ?', 'out-z')).toBeUndefined();
   });
 });
