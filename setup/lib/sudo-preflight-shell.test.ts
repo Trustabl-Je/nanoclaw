@@ -15,8 +15,12 @@ const LIB = path.join(process.cwd(), 'setup', 'lib', 'sudo-preflight.sh');
 interface Machine {
   os?: string;
   uid?: number;
-  /** `node --version` output, or absent. */
+  /** `node --version` of the Node on PATH, or absent. */
   node?: string;
+  /** Where that Node lives: the system dir NodeSource replaces (default) or a version manager's. */
+  nodeFrom?: 'system' | 'manager';
+  /** `node --version` of a Node in ~/.local/bin, off PATH. */
+  localNode?: string;
   uvx?: boolean;
   docker?: boolean;
   /** sudo's answers, or absent when sudo isn't installed. */
@@ -39,14 +43,19 @@ function run(m: Machine): { rc: number; out: string; sudo: string[] } {
   // A fresh machine per run, so stubs from an earlier run in the same test don't leak.
   const machine = fs.mkdtempSync(path.join(dir, 'machine-'));
   const bin = path.join(machine, 'bin');
+  // Stand-ins for /usr/bin and an nvm-style dir; the host's own Node dirs never leak in.
+  const system = path.join(machine, 'usr', 'bin');
+  const manager = path.join(machine, '.nvm', 'bin');
   const sudoLog = path.join(machine, 'sudo.log');
-  fs.mkdirSync(bin);
-  const stub = (name: string, body: string): void => {
-    fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const stub = (name: string, body: string, where = bin): void => {
+    fs.mkdirSync(where, { recursive: true });
+    fs.writeFileSync(path.join(where, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   };
+  fs.mkdirSync(system, { recursive: true });
   stub('uname', `echo ${m.os ?? 'Linux'}`);
   stub('id', `echo ${m.uid ?? 1000}`);
-  if (m.node) stub('node', `echo ${m.node}`);
+  if (m.node) stub('node', `echo ${m.node}`, m.nodeFrom === 'manager' ? manager : system);
+  if (m.localNode) stub('node', `echo ${m.localNode}`, path.join(machine, '.local', 'bin'));
   if (m.uvx) stub('uvx', 'exit 0');
   if (m.docker) stub('docker', 'exit 0');
   if (m.sudo) {
@@ -71,7 +80,13 @@ function run(m: Machine): { rc: number; out: string; sudo: string[] } {
     `if sudo_preflight ${(m.args ?? []).map((a) => `'${a}'`).join(' ')}; then echo "rc=0"; else echo "rc=1"; fi`,
   ].join('\n');
   const res = spawnSync('/bin/bash', ['-c', script], {
-    env: { PATH: bin, HOME: machine, ...m.env },
+    env: {
+      PATH: [bin, manager, system].join(':'),
+      HOME: machine,
+      NODE_APT_DIRS: system,
+      NODE_SYSTEM_DIRS: system,
+      ...m.env,
+    },
     encoding: 'utf8',
   });
   expect(res.stderr).toBe('');
@@ -94,21 +109,46 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
   });
 
   it('names only what is missing', () => {
-    expect(run({ node: 'v22.12.0', sudo: needsPassword, interactive: true }).out).toContain('install Docker,');
+    expect(run({ node: 'v22.23.4', sudo: needsPassword, interactive: true }).out).toContain('install Docker,');
     expect(run({ docker: true, sudo: needsPassword, interactive: true }).out).toContain('install Node,');
   });
 
-  it('treats a Node older than 22 as missing', () => {
-    const r = run({ node: 'v20.18.1', docker: true, sudo: needsPassword, interactive: true });
-    expect(r.out).toContain('install Node,');
+  // install-node.sh puts NodeSource's Node over an outdated system one with sudo.
+  it.each(['v20.18.1', 'v22.12.0', 'v24.1.0', 'v26.2.5'])('asks before updating a system Node %s', (node) => {
+    const r = run({ node, docker: true, sudo: needsPassword, interactive: true });
+    expect(r.out).toContain('Setup needs to install a newer Node,');
     expect(r.sudo).toContain('-v -p   [sudo] password for %p: ');
+  });
+
+  it('names a newer Node next to Docker', () => {
+    const r = run({ node: 'v22.12.0', sudo: { cached: false, validates: false }, interactive: true });
+    expect(r.out).toContain("Couldn't get sudo access to install a newer Node and Docker.");
+    expect(r.out).toContain('install a newer Node (minimum 22.23.4 / 24.22.1 / 26.12.1) and Docker yourself');
+  });
+
+  // install-node.sh stops without sudo for these, or setup.sh never runs it.
+  it.each<[string, Machine]>([
+    ['a patched Node', { node: 'v22.23.4' }],
+    ["a version manager's outdated Node", { node: 'v22.12.0', nodeFrom: 'manager' }],
+    ['a patched Node in ~/.local/bin behind an outdated PATH one', { node: 'v22.12.0', localNode: 'v22.23.4' }],
+    ['a patched Node in ~/.local/bin and none on PATH', { localNode: 'v24.22.1' }],
+    ['uvx with an outdated system Node', { node: 'v22.12.0', uvx: true }],
+    ['Node 23', { node: 'v23.11.0' }],
+    ['Node 25', { node: 'v25.1.0' }],
+    ['a pre-release Node', { node: 'v24.0.0-nightly20260401abcdef' }],
+  ])('does not ask to install Node for %s', (_name, m) => {
+    const r = run({ docker: true, sudo: needsPassword, interactive: true, ...m });
+    expect(r.out).toBe('');
+    expect(r.sudo).toEqual([]);
+    // Docker still counts on its own.
+    expect(run({ ...m, sudo: needsPassword, interactive: true }).out).toContain('Setup needs to install Docker,');
   });
 
   it('stops with a clear message when sudo is refused', () => {
     const r = run({ sudo: { cached: false, validates: false }, interactive: true });
     expect(r.rc).toBe(1);
     expect(r.out).toContain("Couldn't get sudo access to install Node and Docker.");
-    expect(r.out).toContain('install Node 22+ and Docker yourself');
+    expect(r.out).toContain('install Node (minimum 22.23.4 / 24.22.1 / 26.12.1) and Docker yourself');
   });
 
   it('does not ask when sudo works without a password', () => {
@@ -121,7 +161,7 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
   it.each<[string, Machine]>([
     ['root', { uid: 0 }],
     ['macOS', { os: 'Darwin' }],
-    ['Node 22+ and Docker present', { node: 'v24.1.0', docker: true }],
+    ['a patched Node and Docker present', { node: 'v24.22.1', docker: true }],
     ['uvx installs Node without sudo and Docker is present', { uvx: true, docker: true }],
   ])('does not touch sudo for %s', (_name, m) => {
     const r = run({ sudo: needsPassword, interactive: true, ...m });
@@ -132,7 +172,7 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
 
   it('leaves Docker out when the run skips the container step', () => {
     const skipped = { sudo: needsPassword, interactive: true, env: { NANOCLAW_SKIP: 'environment, container' } };
-    expect(run({ ...skipped, node: 'v22.12.0' }).sudo).toEqual([]);
+    expect(run({ ...skipped, node: 'v22.23.4' }).sudo).toEqual([]);
     expect(run(skipped).out).toContain('install Node,');
   });
 
@@ -140,13 +180,13 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
   it.each([[['--skip', 'container']], [['--template-path', 'sales/sdr', '--skip=environment,container']]])(
     'honours %j on the command line',
     (args) => {
-      expect(run({ node: 'v22.12.0', sudo: needsPassword, interactive: true, args }).sudo).toEqual([]);
+      expect(run({ node: 'v22.23.4', sudo: needsPassword, interactive: true, args }).sudo).toEqual([]);
     },
   );
 
   it('lets --skip replace NANOCLAW_SKIP, as setup:auto does', () => {
     const r = run({
-      node: 'v22.12.0',
+      node: 'v22.23.4',
       sudo: needsPassword,
       interactive: true,
       env: { NANOCLAW_SKIP: 'container' },

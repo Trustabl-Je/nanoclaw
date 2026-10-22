@@ -10,6 +10,9 @@
 # One `sudo -v` in the open caches the timestamp those later calls reuse.
 # Uses bash builtins plus uname/id/node/sudo only: Node may not exist yet.
 
+# shellcheck source=setup/lib/node-version.sh
+source "${BASH_SOURCE[0]%/*}/node-version.sh"
+
 # The steps this run skips. As in setup:auto, --skip replaces NANOCLAW_SKIP.
 sudo_preflight_skip() {
   local skip="${NANOCLAW_SKIP:-}"
@@ -24,18 +27,30 @@ sudo_preflight_skip() {
   echo "$skip"
 }
 
-# What setup will install with sudo ("Node", "Docker" or "Node and Docker");
-# exit 1 when nothing needs it. Takes nanoclaw.sh's arguments.
+# Prints "Node" or "a newer Node" when setup.sh will run install-node.sh's
+# NodeSource install, the one path that uses sudo. It doesn't for uvx, for a
+# Node node_use_patched finds, or for a Node install-node.sh refuses to
+# replace (a version manager's, 23, 25, a pre-release).
+sudo_preflight_node() {
+  local current
+  command -v uvx >/dev/null 2>&1 && return 0
+  # A subshell, so the PATH it picks stays setup.sh's to choose.
+  (node_use_patched) && return 0
+  if ! current=$(command -v node); then
+    echo "Node"
+  elif node_from_apt "$current" && node_install_line "$(node --version 2>/dev/null)" >/dev/null; then
+    echo "a newer Node"
+  fi
+  return 0
+}
+
+# What setup will install with sudo ("Node", "a newer Node", "Docker", or Node
+# and Docker); exit 1 when nothing needs it. Takes nanoclaw.sh's arguments.
 sudo_preflight_needs() {
   [ "$(uname -s 2>/dev/null)" = "Linux" ] || return 1
   [ "$(id -u 2>/dev/null)" != "0" ] || return 1
-  local node="" docker="" version skip
-  # setup/install-node.sh installs through uvx, without sudo, when it can.
-  if ! command -v uvx >/dev/null 2>&1; then
-    version=$(node --version 2>/dev/null || true)
-    version=${version#v}
-    [ "${version%%.*}" -ge 22 ] 2>/dev/null || node="Node"
-  fi
+  local node docker="" skip
+  node=$(sudo_preflight_node)
   # A run that skips the container step never installs Docker.
   skip=",$(sudo_preflight_skip "$@"),"
   case "${skip// /}" in
@@ -43,7 +58,7 @@ sudo_preflight_needs() {
     *) command -v docker >/dev/null 2>&1 || docker="Docker" ;;
   esac
   if [ -n "$node" ] && [ -n "$docker" ]; then
-    echo "Node and Docker"
+    echo "$node and $docker"
   elif [ -n "$node$docker" ]; then
     echo "$node$docker"
   else
@@ -70,8 +85,9 @@ sudo_preflight() {
     printf '\n'
     return 0
   fi
+  local minimum="Node (minimum ${NODE_MINIMUMS// / / })"
   printf '\n  %s %s\n' "$(red '✗')" "Couldn't get sudo access to install ${needs}."
   printf '  %s\n\n' \
-    "$(dim "Re-run bash nanoclaw.sh and enter your password, or install ${needs/Node/Node 22+} yourself first.")"
+    "$(dim "Re-run bash nanoclaw.sh and enter your password, or install ${needs/Node/$minimum} yourself first.")"
   return 1
 }
