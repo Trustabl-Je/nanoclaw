@@ -110,6 +110,24 @@ export async function readContainerConfig(
 const lookupAll: Lookup = async (host) => (await dns.promises.lookup(host, { all: true })).map((a) => a.address);
 
 /**
+ * The shell command that saves GATEWAY_BASE_URL and recreates the onecli
+ * service alone on the tag, bind and ports it runs with now: the installer may
+ * not have saved them, and compose's defaults are `latest` and loopback. A
+ * failed read or a non-stock image stops the chain before anything changes.
+ */
+export function gatewayRecreateCommand(host: string): string {
+  return (
+    `cd ~/.onecli && img="$(docker inspect -f '{{.Config.Image}}' onecli)" && ` +
+    'v="${img#ghcr.io/onecli/onecli:}" && [ "$v" != "$img" ] && ' +
+    'gw="$(docker port onecli 10255/tcp | head -n1)" && app="$(docker port onecli 10254/tcp | head -n1)" && ' +
+    '[ -n "$gw" ] && [ -n "$app" ] && ' +
+    `printf '\\nGATEWAY_BASE_URL=%s\\n' "${host}:\${gw##*:}" >> .env && ` +
+    'ONECLI_VERSION="$v" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
+    'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli'
+  );
+}
+
+/**
  * A one-line warning with the exact fix when a gateway on another host points
  * agents at their own machine, else null. Prints host and port only, never the
  * proxy's credentials.
@@ -125,21 +143,14 @@ export function remoteProxyHint(
   const gatewayHost = new URL(gatewayUrl).hostname;
   if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, own))) return null;
   const port = proxy.port || '80';
-  // Recreate onecli alone, on the image, bind and ports it runs with now: the
-  // installer may not have saved them, and compose's defaults are `latest` and
-  // loopback. A failed read stops the chain before anything changes.
-  const recreate =
-    `cd ~/.onecli && img="$(docker inspect -f '{{.Config.Image}}' onecli)" && ` +
-    'gw="$(docker port onecli 10255/tcp | head -n1)" && app="$(docker port onecli 10254/tcp | head -n1)" && ' +
-    '[ -n "$gw" ] && [ -n "$app" ] && ' +
-    `echo "GATEWAY_BASE_URL=${gatewayHost}:\${gw##*:}" >> .env && ` +
-    'ONECLI_VERSION="${img##*:}" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
-    'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli';
+  // The host lands in a shell command the operator runs on the gateway host.
+  const host = /^[A-Za-z0-9.:[\]-]+$/.test(gatewayHost) ? gatewayHost : '<gateway-host>';
+  const recreate = gatewayRecreateCommand(host);
   return (
     `The remote OneCLI gateway tells agents to use the proxy ${proxy.hostname}:${port}, their own machine, ` +
     'so model calls will hang with no reply. On the gateway host, set GATEWAY_BASE_URL to its own address and ' +
     `the gateway port it publishes, and recreate the onecli service as it runs now: ${recreate}. ` +
-    `If its compose file does not load ~/.onecli/.env, set GATEWAY_BASE_URL=${gatewayHost}:<published gateway port> ` +
+    `If its compose file does not load ~/.onecli/.env, set GATEWAY_BASE_URL=${host}:<published gateway port> ` +
     "in the onecli service's environment instead. Re-run setup to check."
   );
 }
