@@ -674,4 +674,28 @@ describe('delivery deadline', () => {
     );
     expect(deliveredRow(session, 'out-v')).toEqual({ status: 'delivered', platform_message_id: 'pm-original' });
   });
+  it('a late landing frees its parked slot even when a post-delivery hook never returns', async () => {
+    for (let i = 0; i < MAX_PARKED; i++) insertOutbound(session, `out-p${i}`);
+    const sends = Array.from({ length: MAX_PARKED }, () => deferred<string>());
+    const calls = recordingAdapter((text) =>
+      text.startsWith('out-p') ? sends[Number(text.slice(5))].promise : undefined,
+    );
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    registerPostDeliveryHook((_msg, hookSession) =>
+      hookSession.id === session.id ? new Promise<void>(() => {}) : undefined,
+    );
+
+    for (let i = 0; i < MAX_PARKED; i++) {
+      const drain = track(deliverSessionMessages(session));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      await drain.promise;
+    }
+    sends.forEach((send, i) => send.resolve(`pm-${i}`));
+    await vi.waitFor(() => expect(deliveredRow(session, `out-p${MAX_PARKED - 1}`)?.status).toBe('delivered'));
+
+    insertOutbound(session, 'out-after');
+    void deliverSessionMessages(session);
+    await vi.waitFor(() => expect(calls).toContain('out-after'));
+  });
 });

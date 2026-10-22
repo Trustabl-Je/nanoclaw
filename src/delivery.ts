@@ -435,7 +435,8 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 
 /**
  * A send landed: mark the row delivered, clear its attempt count, run the
- * user-facing follow-through. `firstDelivery` null (a late send may be out)
+ * user-facing follow-through; `onRecorded` runs once the record is written,
+ * before the follow-through. `firstDelivery` null (a late send may be out)
  * reads the flag from the mailbox, and skips a row already recorded, so a
  * given-up row whose original and retry both land follows through once.
  * Throws only if marking fails.
@@ -446,6 +447,7 @@ async function completeDelivery(
   agentGroup: AgentGroup,
   platformMsgId: string | undefined,
   firstDelivery: boolean | null,
+  onRecorded?: () => void,
 ): Promise<void> {
   let first = firstDelivery ?? false;
   let recorded = false;
@@ -460,6 +462,7 @@ async function completeDelivery(
   if (recorded) {
     // Delivered by the other send, or already marked failed: keep that record.
     await clearAttemptRow(msg.id);
+    onRecorded?.();
     log.warn('Send landed for a row already recorded, keeping the first record', {
       messageId: msg.id,
       sessionId: session.id,
@@ -468,6 +471,7 @@ async function completeDelivery(
     return;
   }
   await clearAttemptRow(msg.id);
+  onRecorded?.();
   if (msg.kind !== 'system' && msg.channelType !== 'agent') {
     pauseTypingRefreshAfterDelivery(session.id);
     if (msg.kind !== 'task_log') {
@@ -589,9 +593,21 @@ function parkOverdueDelivery(
   }, OVERDUE_GIVE_UP_MS);
   giveUp.unref();
 
+  // Free the park slot once the row's record is written: the follow-through
+  // (a post-delivery hook) may run long and must not hold it.
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    if (!gaveUp) overdueDeliveries.delete(key);
+    const left = (unsettledLateSends.get(session.id) ?? 1) - 1;
+    if (left > 0) unsettledLateSends.set(session.id, left);
+    else unsettledLateSends.delete(session.id);
+  };
+
   void send
     .finally(() => clearTimeout(giveUp))
-    .then((platformMsgId) => completeDelivery(msg, session, agentGroup, platformMsgId, null))
+    .then((platformMsgId) => completeDelivery(msg, session, agentGroup, platformMsgId, null, release))
     .then(
       () => log.info('Overdue message delivery landed', { messageId: msg.id, sessionId: session.id }),
       async (err) => {
@@ -600,12 +616,7 @@ function parkOverdueDelivery(
       },
     )
     .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
-    .finally(() => {
-      if (!gaveUp) overdueDeliveries.delete(key);
-      const left = (unsettledLateSends.get(session.id) ?? 1) - 1;
-      if (left > 0) unsettledLateSends.set(session.id, left);
-      else unsettledLateSends.delete(session.id);
-    });
+    .finally(release);
 }
 
 async function deliverMessage(
