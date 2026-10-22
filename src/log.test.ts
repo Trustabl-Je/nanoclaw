@@ -239,6 +239,20 @@ describe('log redacts secrets', () => {
     expect(out).toContain('401');
   });
 
+  it('keeps the issuer prefix and last 4 of a prefixed key in a secret-named field', () => {
+    const key = `sk-ant-api03-${'x'.repeat(40)}WXYZ`;
+    log.warn('provider config', { apiKey: key, password: 'hunter2hunter2' });
+    const out = written.join('');
+    expect(out).toContain('sk-ant-api03-[REDACTED]…WXYZ');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('x'.repeat(40));
+  });
+
+  it('masks a secret-named field that only looks like a hint', () => {
+    log.warn('config', { password: 'hunter2hunter2[REDACTED]…WXYZ' });
+    expect(written.join('')).not.toContain('hunter2');
+  });
+
   it('keeps the name of the env key it reports', () => {
     log.info('Updated .env', { key: 'TELEGRAM_BOT_TOKEN', existed: true });
     expect(written.join('')).toContain('TELEGRAM_BOT_TOKEN');

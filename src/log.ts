@@ -1,4 +1,10 @@
-import { isRedactionPlaceholder, isSecretName, redactSecrets, SECRET_MASK } from './secret-redaction.js';
+import {
+  isRedactionPlaceholder,
+  isSecretName,
+  maskSecretValue,
+  redactSecrets,
+  SECRET_MASK,
+} from './secret-redaction.js';
 
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
@@ -25,7 +31,7 @@ function safeStringify(v: unknown): string {
   try {
     return JSON.stringify(v, function (this: unknown, key, value: unknown) {
       if (typeof value === 'bigint') return `${value}n`;
-      if (isSecretName(key) && isMaskable(value)) return SECRET_MASK;
+      if (isSecretName(key) && isMaskable(value)) return maskField(value);
       if (typeof value !== 'object' || value === null) return value;
       while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
       if (ancestors.includes(value)) return '[Circular]';
@@ -45,6 +51,10 @@ function isMaskable(value: unknown): boolean {
   return typeof value === 'object' && value !== null;
 }
 
+function maskField(value: unknown): string {
+  return typeof value === 'string' ? maskSecretValue(value) : SECRET_MASK;
+}
+
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
     return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
@@ -55,7 +65,7 @@ function formatErr(err: unknown): string {
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(data)) {
-    const value = isSecretName(k) && isMaskable(v) ? SECRET_MASK : k === 'err' ? formatErr(v) : safeStringify(v);
+    const value = isSecretName(k) && isMaskable(v) ? maskField(v) : k === 'err' ? formatErr(v) : safeStringify(v);
     parts.push(`${KEY_COLOR}${k}${RESET}=${redactSecrets(value)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';

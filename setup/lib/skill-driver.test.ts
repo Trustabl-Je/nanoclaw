@@ -195,7 +195,7 @@ describe('thin skill driver', () => {
     const exec = hostExec(root, rawLog);
     await exec(`echo "GITHUB_TOKEN=${token}"`);
     const failure = exec(`echo "auth failed for ${token}" >&2; exit 4`);
-    await expect(failure).rejects.toThrow(/exit 4: auth failed for \[REDACTED\]/);
+    await expect(failure).rejects.toThrow(/exit 4: auth failed for ghp_\[REDACTED\]…AAAA/);
     expect(readFileSync(rawLog, 'utf8')).not.toContain(token);
   });
 

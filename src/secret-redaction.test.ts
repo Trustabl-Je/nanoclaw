@@ -18,6 +18,7 @@ const FAKES = {
   aws: fake('AKIA', 'TESTTESTTESTTEST'),
   telegram: fake('123456789:', `TESTTOKEN${A(26)}`),
   discord: fake('MTE', `${A(23)}.TESTAA.TESTTOKEN${A(29)}`),
+  google: fake('AIza', `TESTKEY${A(28)}`),
   jwt: fake('eyJ', `hbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.TESTSIGNATURE${A(20)}`),
 };
 
@@ -142,7 +143,7 @@ describe('redactSecrets: review cases', () => {
 
   it('finds a token wrapped in ANSI colour codes', () => {
     const out = redactSecrets(`\x1b[32m${FAKES.githubClassic}\x1b[0m`);
-    expect(out).toBe('\x1b[32m[REDACTED]\x1b[0m');
+    expect(out).toBe('\x1b[32mghp_[REDACTED]…AAAA\x1b[0m');
   });
 
   it('does not let a prose word hide the assignment after it', () => {
@@ -196,6 +197,90 @@ describe('redactSecrets: review round 3', () => {
   it('masks a JSON-escaped password that contains a quote', () => {
     const out = redactSecrets(JSON.stringify({ body: JSON.stringify({ password: 'prefix"opaqueSECRET' }) }));
     expect(out).toBe(JSON.stringify({ body: JSON.stringify({ password: '[REDACTED]' }) }));
+  });
+});
+
+describe('redactSecrets: hints, AWS names, plain values', () => {
+  const key = `sk-ant-api03-${'x'.repeat(40)}WXYZ`;
+
+  it('keeps the issuer prefix and last 4 of a prefixed key, nothing else', () => {
+    expect(redactSecrets(`auth failed for ${key}`)).toBe('auth failed for sk-ant-api03-[REDACTED]…WXYZ');
+    expect(redactSecrets(`ANTHROPIC_API_KEY=${key}`)).toBe('ANTHROPIC_API_KEY=sk-ant-api03-[REDACTED]…WXYZ');
+    expect(redactSecrets(`token ${fake('ghp_', `${'x'.repeat(32)}Q1w2`)}`)).toBe('token ghp_[REDACTED]…Q1w2');
+  });
+
+  it('masks a prefixed key whole when fewer than 16 characters would stay hidden', () => {
+    expect(redactSecrets(`slack ${fake('xoxb-', '0123456789AB')}`)).toBe('slack [REDACTED]');
+  });
+
+  it('shows no characters of a value found only by its name or shape', () => {
+    expect(redactSecrets('PASSWORD=hunter2hunter2')).toBe('PASSWORD=[REDACTED]');
+    expect(redactSecrets(`bot ${FAKES.telegram}`)).toBe('bot [REDACTED]');
+  });
+
+  it.each([
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_ACCESS_KEY',
+    'STRIPE_SECRET_KEY',
+    'secretAccessKey',
+    'accessKey',
+    'secret_key',
+  ])('masks %s by name, as a field and as NAME=value', (name) => {
+    expect(isSecretName(name)).toBe(true);
+    expect(redactSecrets(`${name}=opaqueTESTVALUE`)).toBe(`${name}=[REDACTED]`);
+  });
+
+  it('keeps AWS_ACCESS_KEY_ID readable by name (the AKIA shape masks its value)', () => {
+    expect(isSecretName('AWS_ACCESS_KEY_ID')).toBe(false);
+  });
+
+  it('masks a Google API key', () => {
+    expect(redactSecrets(`GOOGLE ${FAKES.google} end`)).toBe('GOOGLE AIza[REDACTED]…AAAA end');
+  });
+
+  it.each(['token: not configured', 'ANTHROPIC_API_KEY=undefined', 'password: missing', 'apiKey: null'])(
+    'leaves a placeholder word readable: %s',
+    (text) => expect(redactSecrets(text)).toBe(text),
+  );
+
+  it('still masks a short real value', () => {
+    expect(redactSecrets('password: hunter2')).toBe('password: [REDACTED]');
+  });
+});
+
+describe('redactSecrets: hint review', () => {
+  it('does not trust a mask marker inside a value', () => {
+    expect(redactSecrets('PASSWORD="hunter2[redacted]"')).toBe('PASSWORD="[REDACTED]"');
+    expect(redactSecrets('Cookie: theme=dark; session=opaqueSECRET; other=[redacted]')).toBe('Cookie: [REDACTED]');
+  });
+
+  it('shows only a known issuer prefix, never payload characters', () => {
+    const out = redactSecrets(`k ${fake('sk-proj-', `a1b2c3d4-${A(16)}WXYZ`)}`);
+    expect(out).toBe('k sk-proj-[REDACTED]…WXYZ');
+  });
+
+  it('does not count the public prefix toward the 16 hidden characters', () => {
+    expect(redactSecrets(`k ${fake('sk-ant-api03-', `${A(10)}WXYZ`)}`)).toBe('k [REDACTED]');
+  });
+
+  it('masks a placeholder word when it is quoted', () => {
+    expect(redactSecrets('curl --password "missing"')).toBe('curl --password "[REDACTED]"');
+    expect(redactSecrets('{"password":"false"}')).toBe('{"password":"[REDACTED]"}');
+  });
+});
+
+describe('redactSecrets: hint review 2', () => {
+  it('masks a PEM key whole even when its body holds a prefixed-key shape', () => {
+    const pem = `-----BEGIN PRIVATE KEY-----\nMEcCAQAwBQYDK2VxBDsEOQ/AIza${A(35)}//\n${'B'.repeat(33)}Q==\n-----END PRIVATE KEY-----`;
+    expect(redactSecrets(`key ${pem} ok`)).toBe('key [REDACTED] ok');
+  });
+
+  it('does not accept a hint-shaped value without a known issuer prefix', () => {
+    expect(redactSecrets('password: "hunter2hunter2[REDACTED]…WXYZ"')).toBe('password: "[REDACTED]"');
+  });
+
+  it('keeps only a known Anthropic prefix', () => {
+    expect(redactSecrets(`k ${fake('sk-ant-secret12-', `${'x'.repeat(24)}WXYZ`)}`)).toBe('k sk-[REDACTED]…WXYZ');
   });
 });
 
