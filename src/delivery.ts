@@ -435,8 +435,8 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 
 /**
  * A send landed: mark the row delivered, clear its attempt count, run the
- * user-facing follow-through; `onRecorded` runs once the record is written,
- * before the follow-through. `firstDelivery` null (a late send may be out)
+ * user-facing follow-through; `onRecorded` runs as soon as the mailbox
+ * record is written, before anything else is awaited. `firstDelivery` null (a late send may be out)
  * reads the flag from the mailbox, and skips a row already recorded, so a
  * given-up row whose original and retry both land follows through once.
  * Throws only if marking fails.
@@ -461,8 +461,8 @@ async function completeDelivery(
   });
   if (recorded) {
     // Delivered by the other send, or already marked failed: keep that record.
-    await clearAttemptRow(msg.id);
     onRecorded?.();
+    await clearAttemptRow(msg.id);
     log.warn('Send landed for a row already recorded, keeping the first record', {
       messageId: msg.id,
       sessionId: session.id,
@@ -470,8 +470,8 @@ async function completeDelivery(
     });
     return;
   }
-  await clearAttemptRow(msg.id);
   onRecorded?.();
+  await clearAttemptRow(msg.id);
   if (msg.kind !== 'system' && msg.channelType !== 'agent') {
     pauseTypingRefreshAfterDelivery(session.id);
     if (msg.kind !== 'task_log') {
