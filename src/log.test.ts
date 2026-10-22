@@ -190,3 +190,57 @@ describe('log never throws on unserializable data', () => {
     expect(written.join('')).toContain('[log data unserializable]');
   });
 });
+
+describe('log redacts secrets', () => {
+  let written: string[];
+
+  beforeEach(() => {
+    written = [];
+    const capture = (chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    };
+    vi.spyOn(process.stderr, 'write').mockImplementation(capture);
+    vi.spyOn(process.stdout, 'write').mockImplementation(capture);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const token = ['ghp', `TESTTOKEN${'A'.repeat(27)}`].join('_');
+
+  it('from the message', () => {
+    log.info(`cloning https://x-access-token:${token}@github.test/repo.git`);
+    expect(written.join('')).not.toContain(token);
+  });
+
+  it('from an Error message and stack', () => {
+    log.error('push failed', { err: new Error(`Command failed: git push https://${token}@github.test/r.git`) });
+    const out = written.join('');
+    expect(out).not.toContain(token);
+    expect(out).toContain('Command failed: git push');
+  });
+
+  it('from a secret-named field even when the value has no known shape', () => {
+    log.warn('adapter config', { botToken: 'opaqueTESTVALUE', channel: 'test' });
+    const out = written.join('');
+    expect(out).not.toContain('opaqueTESTVALUE');
+    expect(out).toContain('test');
+  });
+
+  it('from nested headers and non-Error error objects', () => {
+    log.error('request failed', {
+      err: { status: 401, config: { headers: { Authorization: 'Bearer opaqueTESTVALUE', 'x-api-key': 'opaqueKEY' } } },
+      response: { body: `{"echo":"${token}"}` },
+    });
+    const out = written.join('');
+    expect(out).not.toContain('opaqueTESTVALUE');
+    expect(out).not.toContain('opaqueKEY');
+    expect(out).not.toContain(token);
+    expect(out).toContain('401');
+  });
+
+  it('keeps the name of the env key it reports', () => {
+    log.info('Updated .env', { key: 'TELEGRAM_BOT_TOKEN', existed: true });
+    expect(written.join('')).toContain('TELEGRAM_BOT_TOKEN');
+  });
+});
