@@ -156,18 +156,22 @@ export class CodexProvider implements AgentProvider {
     };
 
     // An image note belongs to the turn that made the image, which the event
-    // names (a sub-agent's turn/started can move activeTurnId). Queued as a new
-    // turn it would be one the runner never asked for, answered on the next
-    // request's route, so a note that cannot steer is dropped.
+    // names (a sub-agent's turn/started can move activeTurnId); a sub-agent's
+    // image is noted in its own turn, so only a sub-agent that can send_file
+    // delivers it. Never queued as a new turn: the runner never asked for one.
     const steerImageNote = (savedPath: string, threadId: string, turnId: string): void => {
       if (!activeServer) {
         console.error(`[codex] image note dropped, query ended: ${savedPath}`);
         return;
       }
       const note = codexImageSavedNote(savedPath);
-      void this.runtime.steerCodexTurn(activeServer, threadId, turnId, note).catch((err) => {
-        console.error(`[codex] image note dropped: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      void this.runtime.steerCodexTurn(activeServer, threadId, turnId, note).then(
+        () => console.error(`[codex] image note steered: ${savedPath}`),
+        (err) =>
+          console.error(
+            `[codex] image note dropped: ${savedPath}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+      );
     };
 
     const self = this;

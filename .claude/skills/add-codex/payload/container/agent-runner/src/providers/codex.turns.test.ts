@@ -161,7 +161,14 @@ describe('CodexProvider active turns', () => {
       turnId: 'turn-1',
       item: { type: 'imageGeneration', status: 'completed', savedPath },
     });
-    await waitFor(() => fake.steerCalls.length === 1);
+    // A sub-agent's image is noted in the sub-agent's own turn.
+    const childPath = '/home/node/.codex/generated_images/child-thread/ig_def.png';
+    fake.notify('item/completed', {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      item: { type: 'imageGeneration', status: 'completed', savedPath: childPath },
+    });
+    await waitFor(() => fake.steerCalls.length === 2);
 
     query.end();
     fake.completeTurn('Sent it.');
@@ -169,6 +176,7 @@ describe('CodexProvider active turns', () => {
 
     expect(fake.steerCalls).toEqual([
       { threadId: 'thread-1', turnId: 'turn-1', inputText: codexImageSavedNote(savedPath) },
+      { threadId: 'child-thread', turnId: 'child-turn', inputText: codexImageSavedNote(childPath) },
     ]);
     expect(codexImageSavedNote(savedPath)).toContain(savedPath);
     expect(codexImageSavedNote(savedPath)).toContain('send_file');
