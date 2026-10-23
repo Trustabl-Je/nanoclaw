@@ -298,7 +298,7 @@ describe('gatewayRecreateCommand', () => {
         'esac',
       ].join('\n');
       fs.writeFileSync(path.join(home, 'bin', 'docker'), stub, { mode: 0o755 });
-      let res = spawnSync('/bin/true');
+      let res = spawnSync('/bin/true', { encoding: 'utf-8' });
       for (let i = 0; i < runs; i++) {
         res = spawnSync('/bin/sh', ['-c', gatewayRecreateCommand('192.168.107.212')], {
           encoding: 'utf-8',
