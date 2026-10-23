@@ -187,12 +187,14 @@ leaking the token to disk outweighs the debugging value.
 
 ## sudo up front (Linux)
 
-Installing or updating Node (bootstrap) and installing or starting Docker
-(container step) runs sudo inside a captured step, where a password prompt
-would be hidden and time out. So the prompt comes first, in the open: `nanoclaw.sh`
-runs `setup/lib/sudo-preflight.sh` before the bootstrap spinner, and `auto.ts`
-calls `setup/lib/sudo-preflight.ts` before the container step when Docker is
-missing or not answering (the sudo timestamp may have expired by then). Both are a foreground `sudo -v` that the step's
+Installing or updating Node (bootstrap) and installing Docker, starting
+it or joining the docker group (container step) runs sudo inside a
+captured step, where a password prompt would be hidden and time out. So
+the prompt comes first, in the open: `nanoclaw.sh` runs
+`setup/lib/sudo-preflight.sh` before the bootstrap spinner, and `auto.ts`
+calls `setup/lib/sudo-preflight.ts` before the container step when Docker
+is missing, not answering or refusing the user (the sudo timestamp may
+have expired by then). Both are a foreground `sudo -v` that the step's
 own sudo calls then reuse. Root, passwordless sudo and runs without a
 terminal skip it.
 
