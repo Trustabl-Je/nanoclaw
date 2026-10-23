@@ -121,7 +121,7 @@ export async function run(args: string[]): Promise<void> {
   await entry.runAuth();
   await entry.runInstallCheck?.();
   // Auth may save settings the host reads only at start (OpenCode's endpoint).
-  // Only .env changed here (any host code was built above), so restart without a build.
+  // Settings the host reads at start changed: reload them even if a build fails.
   if (!restartFailed && readHostSettings() !== settings) {
     // A host restart adopts running agent containers, which keep the settings
     // they started with until they restart.
@@ -136,7 +136,13 @@ const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
 
 function restartHostFor(name: string, opts: { settingsOnly?: boolean } = {}): 'restarted' | 'no-service' | 'failed' {
   console.log(`Restarting NanoClaw so the running host loads ${name}…`);
-  const restart = restartHost(process.cwd(), { build: !opts.settingsOnly });
+  const restart = restartHost(process.cwd(), { build: opts.settingsOnly ? 'try' : true });
+  if (restart.status !== 'failed' && restart.buildFailed) {
+    // The running build may predate this provider; the settings reload still helps.
+    console.error(
+      `Couldn't rebuild NanoClaw (${restart.buildFailed}); restarting the existing build so it reads the new settings. After fixing the build, run: ${HOST_RESTART_COMMAND}`,
+    );
+  }
   if (restart.status === 'restarted') return 'restarted';
   if (restart.status === 'no-service') {
     // Nothing failed: the service step starts the build made above. A host

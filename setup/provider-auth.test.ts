@@ -10,7 +10,7 @@ const fixture = vi.hoisted(() => ({
   offline: false,
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
-  restart: { status: 'restarted' } as { status: string; message?: string },
+  restart: { status: 'restarted' } as { status: string; message?: string; buildFailed?: string },
   hostSettings: '',
   blockers: [] as string[],
   contractModules: [] as string[],
@@ -70,8 +70,8 @@ vi.mock('./lib/container-build.js', () => ({
 vi.mock('./lib/host-restart.js', () => ({
   HOST_RESTART_COMMAND: 'pnpm run build && bash setup/lib/restart.sh',
   HOST_RESTART_ONLY_COMMAND: 'bash setup/lib/restart.sh',
-  restartHost: (_root?: string, opts?: { build?: boolean }) => {
-    fixture.order.push(opts?.build === false ? 'restart-only' : 'restart-host');
+  restartHost: (_root?: string, opts?: { build?: boolean | 'try' }) => {
+    fixture.order.push(opts?.build === 'try' ? 'restart-try' : 'restart-host');
     return fixture.restart;
   },
   readHostSettings: () => fixture.hostSettings,
@@ -223,7 +223,7 @@ describe('standalone provider setup flow', () => {
       'load-contracts',
       'auth',
       'check',
-      'restart-only',
+      'restart-try',
     ]);
   });
   // Re-authenticating an installed provider can save a new endpoint; the
@@ -234,8 +234,8 @@ describe('standalone provider setup flow', () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    // Only .env changed, so an unrelated build break can't fail the re-auth.
-    expect(fixture.order).toEqual(['auth', 'restart-only']);
+    // A build that fails for an unrelated reason doesn't stop the settings reload.
+    expect(fixture.order).toEqual(['auth', 'restart-try']);
     expect(process.exitCode).toBeUndefined();
     // Running agent containers keep the settings they started with.
     expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
@@ -251,12 +251,25 @@ describe('standalone provider setup flow', () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-only']);
+    expect(fixture.order).toEqual(['auth', 'restart-try']);
     const out = log.mock.calls.flat().join('\n');
     expect(out).toContain('No NanoClaw service is installed');
     // A host run by hand may still hold agents; that clause rides in the same message.
     expect(out).toContain('bin/ncl groups restart --id');
     expect(out).not.toContain('Agents already running');
+    expect(process.exitCode).toBeUndefined();
+  });
+  it('warns but still reloads the settings when the build fails after a re-auth', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fixture.restart = { status: 'restarted', buildFailed: 'pnpm run build exited 2' };
+    fixture.auth.mockImplementationOnce(async () => {
+      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
+    });
+    await run(['opencode']);
+    expect(fixture.order).toEqual(['auth', 'restart-try']);
+    expect(warn.mock.calls.flat().join('\n')).toContain('pnpm run build exited 2');
+    expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
     expect(process.exitCode).toBeUndefined();
   });
   it('prints the restart-only command when a settings restart fails', async () => {
@@ -266,7 +279,7 @@ describe('standalone provider setup flow', () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-only']);
+    expect(fixture.order).toEqual(['auth', 'restart-try']);
     expect(error.mock.calls[0][0]).toContain('bash setup/lib/restart.sh');
     expect(error.mock.calls[0][0]).not.toContain('pnpm run build');
     expect(process.exitCode).toBe(1);

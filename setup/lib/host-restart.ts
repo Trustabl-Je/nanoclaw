@@ -20,8 +20,8 @@ export const HOST_RESTART_ONLY_COMMAND = 'bash setup/lib/restart.sh';
 
 /** `no-service`: nothing runs this checkout's host, so there is nothing to reload. */
 export type HostRestartResult =
-  | { status: 'restarted' }
-  | { status: 'no-service' }
+  | { status: 'restarted'; buildFailed?: string }
+  | { status: 'no-service'; buildFailed?: string }
   | { status: 'failed'; message: string };
 
 /** The `.env` text the host reads at start; compare two reads to see whether a restart is due. */
@@ -35,21 +35,30 @@ export function readHostSettings(projectRoot: string = process.cwd()): string {
 
 /**
  * Rebuild the host and restart its service. Synchronous with inherited output.
- * `build: false` only restarts: a settings change needs no build, and an
- * unrelated build break must not block it.
+ * `build: 'try'` is for a settings change: it still builds (an earlier run may
+ * have stopped before compiling), but restarts the existing build if that
+ * fails, reporting it as `buildFailed`, since the new settings only need a
+ * restart.
  */
-export function restartHost(projectRoot: string = process.cwd(), opts: { build?: boolean } = {}): HostRestartResult {
-  const steps: Array<[string, string[]]> = [
-    ...(opts.build === false ? [] : [['pnpm', ['run', 'build']] as [string, string[]]]),
-    ['bash', ['setup/lib/restart.sh']],
-  ];
-  for (const [command, args] of steps) {
+export function restartHost(
+  projectRoot: string = process.cwd(),
+  opts: { build?: boolean | 'try' } = {},
+): HostRestartResult {
+  const run = (command: string, args: string[]): { code: number | null; problem?: string } => {
     const res = spawnSync(command, args, { cwd: projectRoot, stdio: ['ignore', 'inherit', 'inherit'] });
     const step = `${command} ${args.join(' ')}`;
-    if (res.error) return { status: 'failed', message: `couldn't run ${step}: ${res.error.message}` };
-    if (res.signal) return { status: 'failed', message: `${step} was terminated by ${res.signal}` };
-    if (command === 'bash' && res.status === 2) return { status: 'no-service' };
-    if (res.status !== 0) return { status: 'failed', message: `${step} exited ${res.status}` };
+    if (res.error) return { code: null, problem: `couldn't run ${step}: ${res.error.message}` };
+    if (res.signal) return { code: null, problem: `${step} was terminated by ${res.signal}` };
+    return { code: res.status, problem: res.status === 0 ? undefined : `${step} exited ${res.status}` };
+  };
+  let buildFailed: string | undefined;
+  if (opts.build !== false) {
+    const build = run('pnpm', ['run', 'build']);
+    if (build.problem && opts.build !== 'try') return { status: 'failed', message: build.problem };
+    buildFailed = build.problem;
   }
-  return { status: 'restarted' };
+  const restart = run('bash', ['setup/lib/restart.sh']);
+  if (restart.code === 2) return buildFailed ? { status: 'no-service', buildFailed } : { status: 'no-service' };
+  if (restart.problem) return { status: 'failed', message: restart.problem };
+  return buildFailed ? { status: 'restarted', buildFailed } : { status: 'restarted' };
 }
