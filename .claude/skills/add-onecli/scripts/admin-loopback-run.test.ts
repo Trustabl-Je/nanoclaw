@@ -35,6 +35,7 @@ let configSetFails: boolean;
 let dir: string;
 let started: ReturnType<typeof parse> | undefined;
 let bindings: Record<string, string[]>;
+const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 // Resolve the substitutions used by the fixture, with shell settings taking precedence.
 function resolveCompose(args: string[], env: NodeJS.ProcessEnv): ReturnType<typeof parse> {
@@ -49,6 +50,8 @@ function resolveCompose(args: string[], env: NodeJS.ProcessEnv): ReturnType<type
 }
 
 beforeEach(() => {
+  // The fresh-install rewrite runs on Linux only; simulate it on any test host.
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   vi.resetModules();
   calls.file.mockReset();
   calls.shell.mockReset();
@@ -130,6 +133,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  Object.defineProperty(process, 'platform', platform);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -247,9 +251,8 @@ describe('fresh gateway setup', () => {
     const { run } = await import('./setup.js');
     await run([]);
     expect(started.services.onecli.environment.APP_URL).toBe(publicUrl);
-    expect(parseEnv(fs.readFileSync(path.join(dir, '.env'), 'utf8')).APP_URL).toBe(
-      source === 'saved environment' ? publicUrl : undefined,
-    );
+    // A shell-only APP_URL is saved too, so later `docker compose up -d` runs keep it.
+    expect(parseEnv(fs.readFileSync(path.join(dir, '.env'), 'utf8')).APP_URL).toBe(publicUrl);
     expect(endpoint).toBe('http://127.0.0.1:10254');
   });
 
@@ -273,6 +276,9 @@ describe('published-port verification guide', () => {
     expect(section).toContain('`127.0.0.1:<admin port>:10254`');
     expect(section).toContain('`127.0.0.1:<Postgres port>:5432`');
     expect(section).toContain('Leave the gateway proxy line alone');
+    expect(section).toContain('docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10254/tcp');
+    expect(section).not.toMatch(/docker port onecli /);
+    expect(section).toContain('Re-running the upstream OneCLI installer');
     expect(section).toContain('`APP_URL: ${APP_URL:-http://127.0.0.1:<admin port>}`');
     expect(section).toContain('`APP_URL=http://127.0.0.1:<admin port>`');
     expect(section).toContain('unless it already sets a public `APP_URL`');

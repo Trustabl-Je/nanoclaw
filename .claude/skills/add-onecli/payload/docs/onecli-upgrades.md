@@ -119,8 +119,8 @@ If the tag is not the pin, go back to step 2: the pin is not saved, or the compo
 **Verify the bind interface.** The admin API (`:10254`) and Postgres (`:5432`) are published on `127.0.0.1`. The gateway proxy port (`:10255`) stays on the Docker bridge (`host.docker.internal` → e.g. `172.17.0.1`). Check the published host ports directly:
 
 ```bash
-docker port onecli 10254/tcp   # 127.0.0.1:10254 only
-docker port onecli 10255/tcp   # the existing bridge address and port
+docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10254/tcp   # 127.0.0.1:10254 only
+docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10255/tcp   # the existing bridge address and port
 (cd ~/.onecli && docker port "$(docker compose ps -q postgres)" 5432/tcp)   # 127.0.0.1 and the existing Postgres port only
 ```
 
@@ -135,6 +135,8 @@ docker run --rm --add-host=host.docker.internal:host-gateway curlimages/curl sh 
 `gateway` must print a status code (any, for example `400`), not `000`. If it prints `000` while the host-side check passed, set `ONECLI_BIND_HOST` in `~/.onecli/.env` to the docker-bridge IP and `cd ~/.onecli && env -u ONECLI_VERSION docker compose up -d`. Symptom if skipped: host log clean, agents fail all API calls.
 
 On Linux with Docker Engine, `admin` should print `000` for this default-bridge probe. On Docker Desktop (macOS, Windows), `host.docker.internal` reaches the host's loopback, so the `admin` probe does not apply.
+
+Re-running the upstream OneCLI installer downloads a new `~/.onecli/docker-compose.yml`, which publishes these ports on the bridge again; run the steps below afterwards.
 
 For a gateway installed before this change, setup leaves its binds alone and reports any non-loopback or unknown admin and Postgres bindings. To update it manually:
 

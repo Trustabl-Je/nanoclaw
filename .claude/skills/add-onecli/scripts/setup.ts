@@ -311,10 +311,10 @@ function localGatewayDocker(dir = ONECLI_DIR): LocalGatewayDocker {
 }
 
 /**
- * Fit a freshly installed gateway to NanoClaw: on Linux add the host-service
+ * Fit a freshly installed Linux gateway to NanoClaw: add the host-service
  * mapping, and publish its admin API and Postgres on loopback only. Agent
  * containers only need the gateway proxy port (see admin-loopback.ts).
- * Returns the URL the host should use for the admin API.
+ * Other platforms are left as installed. Returns the host's admin API URL.
  */
 export function configureLocalGateway(
   installerUrl: string,
@@ -322,6 +322,7 @@ export function configureLocalGateway(
   docker: LocalGatewayDocker = localGatewayDocker(),
   dir = ONECLI_DIR,
 ): string {
+  if (platform !== 'linux') return installerUrl;
   const composeFile = path.join(dir, 'docker-compose.yml');
   const current = fs.readFileSync(composeFile, 'utf8');
   let next = withLinuxHostGateway(current, platform);
@@ -341,14 +342,25 @@ export function configureLocalGateway(
       adminUrl = installer.origin;
       // Keep a public APP_URL (tunnel, proxy, domain); replace only the installer's bridge URL.
       const envFile = path.join(dir, '.env');
-      const appUrl = readSavedEnv(envFile).APP_URL ?? process.env.APP_URL;
+      const savedAppUrl = readSavedEnv(envFile).APP_URL;
+      const appUrl = savedAppUrl ?? process.env.APP_URL;
       if (!appUrl || sameOrigin(appUrl, installerUrl)) writeEnvVar('APP_URL', adminUrl, envFile);
+      // Save a shell-only one, so later `docker compose up -d` runs keep it.
+      else if (savedAppUrl === undefined && isHttpUrl(appUrl)) writeEnvVar('APP_URL', appUrl, envFile);
     }
   }
   if (next === current) return adminUrl;
   fs.writeFileSync(composeFile, next);
   docker.up();
   return adminUrl;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
 }
 
 function sameOrigin(a: string, b: string): boolean {

@@ -248,6 +248,14 @@ describe('local gateway', () => {
       expect(ups).toBe(1);
     });
 
+    it('does not read or write the compose file off Linux, as before', () => {
+      const url = 'http://127.0.0.1:10254';
+      expect(configureLocalGateway(url, 'darwin', docker, dir)).toBe(url);
+      expect(configureLocalGateway('http://172.17.0.1:10254', 'darwin', docker, dir)).toBe('http://172.17.0.1:10254');
+      expect(fs.existsSync(path.join(dir, 'docker-compose.yml'))).toBe(false);
+      expect(ups).toBe(0);
+    });
+
     it('leaves a macOS install alone', () => {
       write('docker-compose.yml', compose145);
       expect(configureLocalGateway('http://127.0.0.1:10254', 'darwin', docker, dir)).toBe('http://127.0.0.1:10254');
