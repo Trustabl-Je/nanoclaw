@@ -11,6 +11,8 @@ const fixture = vi.hoisted(() => ({
   hasDocker: true,
   /** Exit code of `docker info`. */
   dockerInfo: 0,
+  /** What `docker info` prints to stderr. */
+  dockerStderr: '',
   spawnSync: vi.fn(),
   runInheritScript: vi.fn(),
 }));
@@ -38,10 +40,13 @@ beforeEach(() => {
     validate: 0,
     hasDocker: true,
     dockerInfo: 0,
+    dockerStderr: '',
   });
-  fixture.spawnSync.mockImplementation((cmd: string) => ({
-    status: cmd === 'docker' ? fixture.dockerInfo : fixture.cached,
-  }));
+  fixture.spawnSync.mockImplementation((cmd: string) =>
+    cmd === 'docker'
+      ? { status: fixture.dockerInfo, stdout: '', stderr: fixture.dockerStderr }
+      : { status: fixture.cached },
+  );
   fixture.runInheritScript.mockImplementation(async () => fixture.validate);
   process.stdin.isTTY = true;
 });
@@ -98,8 +103,19 @@ describe('dockerSudoReason', () => {
   // needed) whenever `docker info` fails, not only on a fresh install.
   it('is start when Docker is installed but not reachable', () => {
     fixture.dockerInfo = 1;
+    fixture.dockerStderr =
+      'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
     expect(dockerSudoReason()).toBe('start');
-    expect(fixture.spawnSync).toHaveBeenCalledWith('docker', ['info'], expect.objectContaining({ stdio: 'ignore' }));
+    expect(fixture.spawnSync).toHaveBeenCalledWith('docker', ['info'], expect.objectContaining({ timeout: 15_000 }));
+  });
+
+  // Docker runs but the user isn't in the docker group (or the session
+  // predates joining it). The step still uses sudo, for `usermod`.
+  it('is group when the Docker socket refuses the user', () => {
+    fixture.dockerInfo = 1;
+    fixture.dockerStderr =
+      'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info": dial unix /var/run/docker.sock: connect: permission denied';
+    expect(dockerSudoReason()).toBe('group');
   });
 
   it('leaves a probe that timed out to the step, as before', () => {

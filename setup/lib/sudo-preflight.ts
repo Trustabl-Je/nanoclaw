@@ -8,17 +8,27 @@ export const SUDO_PROMPT = '   [sudo] password for %p: ';
 
 export type SudoUpFront = 'not-needed' | 'granted' | 'refused';
 
+export type DockerSudoReason = 'install' | 'start' | 'group';
+
 /**
  * Why the container step will call sudo here, if it will. Besides installing
- * a missing Docker, on Linux it runs `sudo systemctl start docker` (and
- * `usermod` when needed) whenever `docker info` fails.
+ * a missing Docker, on Linux it runs `sudo systemctl start docker` whenever
+ * `docker info` fails, and `sudo usermod` when the socket refuses the user.
  */
-export function dockerSudoReason(): 'install' | 'start' | undefined {
+export function dockerSudoReason(): DockerSudoReason | undefined {
   if (getPlatform() !== 'linux' || isRoot()) return undefined;
   if (!commandExists('docker')) return 'install';
-  const info = spawnSync('docker', ['info'], { stdio: 'ignore', timeout: 15_000 });
+  // A hung daemon holds this for the full 15 s. It runs once, and the step's
+  // own `docker info` (no timeout) would hang on the same daemon anyway.
+  const info = spawnSync('docker', ['info'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf-8',
+    timeout: 15_000,
+  });
   // A probe that timed out proves nothing; leave it to the step, as before.
-  return info.status === 0 || info.status === null ? undefined : 'start';
+  if (info.status === 0 || info.status === null) return undefined;
+  // Same check as the step's (setup/container.ts): the socket refuses us.
+  return /permission denied/i.test(`${info.stderr ?? ''}\n${info.stdout ?? ''}`) ? 'group' : 'start';
 }
 
 /**

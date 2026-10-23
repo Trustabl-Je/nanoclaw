@@ -11,7 +11,7 @@ const fixture = vi.hoisted(() => ({
   runWindowedStep: vi.fn(),
   sudoUpFront: vi.fn(),
   message: vi.fn(),
-  dockerSudo: 'install' as 'install' | 'start' | undefined,
+  dockerSudo: 'install' as 'install' | 'start' | 'group' | undefined,
   wsl: false,
 }));
 vi.mock('./providers/index.js', () => ({}));
@@ -61,6 +61,12 @@ vi.mock('@clack/prompts', () => ({
   log: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), message: fixture.message },
 }));
 
+// Each fresh import of the wizard adds src/log.ts's process handlers again.
+const processEvents: NodeJS.EventEmitter = process;
+const processHandlers = ['uncaughtException', 'unhandledRejection'].map(
+  (event) => [event, processEvents.listeners(event)] as const,
+);
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -81,6 +87,11 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  for (const [event, kept] of processHandlers) {
+    for (const handler of processEvents.listeners(event)) {
+      if (!kept.includes(handler)) processEvents.off(event, handler as (...args: unknown[]) => void);
+    }
+  }
 });
 
 async function runWizardUntilExit(): Promise<void> {
@@ -122,14 +133,30 @@ describe('container step: sudo up front', () => {
     expect(fixture.runWindowedStep).toHaveBeenCalledWith('container', expect.anything());
   });
 
-  it.each(['install', 'start'] as const)('stops before the step when sudo to %s Docker is refused', async (reason) => {
+  // `group`: Docker runs but its socket refuses the user, so the step will
+  // `usermod` them into the docker group.
+  it.each([
+    ['install', 'install Docker', 'install Docker yourself first'],
+    ['start', 'start Docker', 'start Docker yourself first'],
+    [
+      'group',
+      'add you to the docker group',
+      'add yourself to the docker group and run setup from a `newgrp docker` shell',
+    ],
+  ] as const)('explains, then stops before the step when sudo for %s is refused', async (reason, task, diy) => {
     fixture.dockerSudo = reason;
-    fixture.sudoUpFront.mockResolvedValue('refused');
+    fixture.sudoUpFront.mockImplementation(async (explain: () => void) => {
+      explain();
+      return 'refused';
+    });
     await runWizardUntilExit();
+    expect(fixture.message.mock.calls.map(([text]) => String(text).replace(/\s+/g, ' '))).toContain(
+      `Setup needs to ${task}, so it will ask for your Linux password (sudo).`,
+    );
     expect(fixture.fail).toHaveBeenCalledWith(
       'container',
-      `Couldn't get sudo access to ${reason} Docker.`,
-      expect.stringContaining(`${reason} Docker yourself`),
+      `Couldn't get sudo access to ${task}.`,
+      `Run setup again and enter your Linux password, or ${diy}.`,
     );
     expect(fixture.runWindowedStep).not.toHaveBeenCalled();
   });
