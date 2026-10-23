@@ -383,7 +383,8 @@ describe('add-dial', () => {
 // and add-dial-number adds a line to an installed Dial channel after setup.
 const STILL_USE_JQ = ['add-dial-number', 'add-dial-tool'];
 
-it('no other skill the engine applies pipes through jq', () => {
+// Checks nc:run bodies only, not the scripts they call.
+it('no other skill has an nc:run step that pipes through jq', () => {
   const runsJq = (body: string): boolean => /(?:^|[\s|;&(])jq(?:\s|$)/m.test(body);
   const offenders = readdirSync(SKILLS_DIR)
     .filter((name) => existsSync(join(SKILLS_DIR, name, 'SKILL.md')))
