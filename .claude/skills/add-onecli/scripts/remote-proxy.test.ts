@@ -328,7 +328,7 @@ describe('gatewayRecreateCommand', () => {
     expect(res.compose).toBe('compose up -d --no-deps onecli | 1.45.0 0.0.0.0 11255 11254');
   });
 
-  it('keeps the temp copy and says where when .env cannot be rewritten', () => {
+  it('keeps .env and the new copy, and says where, when the final step fails', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-recreate-full-'));
     try {
       fs.mkdirSync(path.join(home, '.onecli'));
@@ -346,14 +346,15 @@ describe('gatewayRecreateCommand', () => {
         ].join('\n'),
         { mode: 0o755 },
       );
-      // A cat that fails stands in for a full disk during the final write.
-      fs.writeFileSync(path.join(home, 'bin', 'cat'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      // An mv that fails stands in for a full disk during the final step.
+      fs.writeFileSync(path.join(home, 'bin', 'mv'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
       const res = spawnSync('/bin/sh', ['-c', gatewayRecreateCommand('192.168.107.212')], {
         encoding: 'utf-8',
         env: { PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, HOME: home },
       });
       expect(res.status).not.toBe(0);
       expect(res.stderr).toContain('its full new contents are in');
+      expect(fs.readFileSync(path.join(home, '.onecli', '.env'), 'utf-8')).toBe('POSTGRES_PASSWORD=pw\n');
       const kept = fs.readdirSync(path.join(home, '.onecli')).filter((f) => f.startsWith('.env.'));
       expect(kept).toHaveLength(1);
       expect(fs.readFileSync(path.join(home, '.onecli', kept[0]), 'utf-8')).toBe(
@@ -364,14 +365,14 @@ describe('gatewayRecreateCommand', () => {
     }
   });
 
-  it('replaces an earlier GATEWAY_BASE_URL line instead of adding another', () => {
+  it('replaces an earlier GATEWAY_BASE_URL line where it stands instead of adding another', () => {
     const res = runRecreate(
       { image: 'ghcr.io/onecli/onecli:1.45.0', gw: '10.0.0.5:10255', app: '10.0.0.5:10254' },
-      'POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=old:1\n',
+      'POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=old:1\nAFTER=${GATEWAY_BASE_URL}\n',
       2,
     );
     expect(res.status).toBe(0);
-    expect(res.env).toBe('POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=192.168.107.212:10255\n');
+    expect(res.env).toBe('POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=192.168.107.212:10255\nAFTER=${GATEWAY_BASE_URL}\n');
   });
 
   // Root reads a mode-0200 file anyway, so this only means something unprivileged.

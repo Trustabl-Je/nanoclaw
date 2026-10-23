@@ -128,12 +128,12 @@ export function gatewayRecreateCommand(host: string): string {
     '[ -n "$gw" ] && [ -n "$app" ] && ' +
     `val="${host}:\${gw##*:}" && ` +
     `case "$val" in *'<'*) echo 'Replace <gateway-host> with this host address first' >&2; false ;; esac && ` +
-    // A unique temp file; grep's exit 2 (unreadable .env) stops before .env is
-    // rewritten, and a failed write keeps the temp copy, so settings survive.
+    // Built in a unique temp file and renamed over .env, so .env is always whole;
+    // the line is replaced where it stands. An unreadable .env stops here.
     '(umask 077 && touch .env && t="$(mktemp .env.XXXXXX)" && ' +
-    'if { grep -v \'^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=\' .env || [ $? -eq 1 ]; } > "$t" && ' +
-    'echo "GATEWAY_BASE_URL=$val" >> "$t"; then { cat "$t" > .env && rm -f "$t"; } || ' +
-    '{ echo "Could not rewrite ~/.onecli/.env; its full new contents are in ~/.onecli/$t" >&2; false; }; ' +
+    `if awk -v l="GATEWAY_BASE_URL=$val" '/^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=/ { if (!d) print l; d = 1; next } ` +
+    `{ print } END { if (!d) print l }' .env > "$t"; then mv -f "$t" .env || ` +
+    '{ echo "Could not replace ~/.onecli/.env; its full new contents are in ~/.onecli/$t" >&2; false; }; ' +
     'else rm -f "$t"; false; fi) && ' +
     'ONECLI_VERSION="$v" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
     'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli && ' +
