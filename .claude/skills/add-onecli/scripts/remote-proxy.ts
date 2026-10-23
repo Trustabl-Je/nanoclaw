@@ -128,8 +128,11 @@ export function gatewayRecreateCommand(host: string): string {
     '[ -n "$gw" ] && [ -n "$app" ] && ' +
     `val="${host}:\${gw##*:}" && ` +
     `case "$val" in *'<'*) echo 'Replace <gateway-host> with this host address first' >&2; false ;; esac && ` +
-    "(umask 077 && touch .env && { grep -v '^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=' .env; " +
-    'echo "GATEWAY_BASE_URL=$val"; } > .env.new && cat .env.new > .env && rm .env.new) && ' +
+    // A unique temp file, and grep's exit 2 (unreadable .env) stops before .env
+    // is rewritten, so a failed read never drops the saved settings.
+    '(umask 077 && touch .env && t="$(mktemp .env.XXXXXX)" && ' +
+    '{ { grep -v \'^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=\' .env || [ $? -eq 1 ]; } > "$t" && ' +
+    'echo "GATEWAY_BASE_URL=$val" >> "$t" && cat "$t" > .env; r=$?; rm -f "$t"; [ $r -eq 0 ]; }) && ' +
     'ONECLI_VERSION="$v" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
     'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli && ' +
     '{ [ "$(docker exec onecli printenv GATEWAY_BASE_URL)" = "$val" ] || { echo ' +

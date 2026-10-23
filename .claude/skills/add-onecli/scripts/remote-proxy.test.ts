@@ -338,6 +338,39 @@ describe('gatewayRecreateCommand', () => {
     expect(res.env).toBe('POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=192.168.107.212:10255\n');
   });
 
+  it('leaves .env alone when it cannot read it, and leaves no temp file behind', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-recreate-ro-'));
+    try {
+      fs.mkdirSync(path.join(home, '.onecli'));
+      fs.mkdirSync(path.join(home, 'bin'));
+      const envFile = path.join(home, '.onecli', '.env');
+      fs.writeFileSync(envFile, 'POSTGRES_PASSWORD=pw\n');
+      fs.chmodSync(envFile, 0o200);
+      fs.writeFileSync(
+        path.join(home, 'bin', 'docker'),
+        [
+          '#!/bin/sh',
+          'case "$1" in',
+          "  inspect) echo 'ghcr.io/onecli/onecli:1.45.0' ;;",
+          '  port) [ "$3" = 10255/tcp ] && echo 10.0.0.5:10255 || echo 10.0.0.5:10254 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res = spawnSync('/bin/sh', ['-c', gatewayRecreateCommand('192.168.107.212')], {
+        encoding: 'utf-8',
+        env: { PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, HOME: home },
+      });
+      fs.chmodSync(envFile, 0o600);
+      expect(res.status).not.toBe(0);
+      expect(fs.readFileSync(envFile, 'utf-8')).toBe('POSTGRES_PASSWORD=pw\n');
+      expect(fs.readdirSync(path.join(home, '.onecli'))).toEqual(['.env']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('fails loudly when the value does not reach the container', () => {
     const res = runRecreate({
       image: 'ghcr.io/onecli/onecli:1.45.0',
