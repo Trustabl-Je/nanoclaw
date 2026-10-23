@@ -10,7 +10,7 @@ const fixture = vi.hoisted(() => ({
   offline: false,
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
-  restart: { status: 'restarted' } as { status: string; message?: string; buildFailed?: string },
+  restart: { status: 'restarted' } as { status: string; message?: string },
   hostSettings: '',
   blockers: [] as string[],
   contractModules: [] as string[],
@@ -69,9 +69,8 @@ vi.mock('./lib/container-build.js', () => ({
 }));
 vi.mock('./lib/host-restart.js', () => ({
   HOST_RESTART_COMMAND: 'pnpm run build && bash setup/lib/restart.sh',
-  HOST_RESTART_ONLY_COMMAND: 'bash setup/lib/restart.sh',
-  restartHost: (_root?: string, opts?: { build?: boolean | 'try' }) => {
-    fixture.order.push(opts?.build === 'try' ? 'restart-try' : 'restart-host');
+  restartHost: () => {
+    fixture.order.push('restart-host');
     return fixture.restart;
   },
   readHostSettings: () => fixture.hostSettings,
@@ -223,7 +222,7 @@ describe('standalone provider setup flow', () => {
       'load-contracts',
       'auth',
       'check',
-      'restart-try',
+      'restart-host',
     ]);
   });
   // Re-authenticating an installed provider can save a new endpoint; the
@@ -234,8 +233,7 @@ describe('standalone provider setup flow', () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    // A build that fails for an unrelated reason doesn't stop the settings reload.
-    expect(fixture.order).toEqual(['auth', 'restart-try']);
+    expect(fixture.order).toEqual(['auth', 'restart-host']);
     expect(process.exitCode).toBeUndefined();
     // Running agent containers keep the settings they started with.
     expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
@@ -251,7 +249,7 @@ describe('standalone provider setup flow', () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-try']);
+    expect(fixture.order).toEqual(['auth', 'restart-host']);
     const out = log.mock.calls.flat().join('\n');
     expect(out).toContain('No NanoClaw service is installed');
     // A host run by hand may still hold agents; that clause rides in the same message.
@@ -259,29 +257,16 @@ describe('standalone provider setup flow', () => {
     expect(out).not.toContain('Agents already running');
     expect(process.exitCode).toBeUndefined();
   });
-  it('warns but still reloads the settings when the build fails after a re-auth', async () => {
-    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    fixture.restart = { status: 'restarted', buildFailed: 'pnpm run build exited 2' };
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
-    await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-try']);
-    expect(warn.mock.calls.flat().join('\n')).toContain('pnpm run build exited 2');
-    expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
-    expect(process.exitCode).toBeUndefined();
-  });
-  it('prints the restart-only command when a settings restart fails', async () => {
+  // tsc can emit dist/ despite errors, so a failed build is never restarted onto.
+  it('keeps the running host on a failed build after a re-auth, with the credential saved', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    fixture.restart = { status: 'failed', message: 'restart.sh exited 1' };
+    fixture.restart = { status: 'failed', message: 'pnpm run build exited 2' };
     fixture.auth.mockImplementationOnce(async () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-try']);
-    expect(error.mock.calls[0][0]).toContain('bash setup/lib/restart.sh');
-    expect(error.mock.calls[0][0]).not.toContain('pnpm run build');
+    expect(fixture.order).toEqual(['auth', 'restart-host']);
+    expect(error.mock.calls[0][0]).toContain('pnpm run build && bash setup/lib/restart.sh');
     expect(process.exitCode).toBe(1);
   });
   // What counts as a host change is applyProviderSkill's call (install.test.ts).

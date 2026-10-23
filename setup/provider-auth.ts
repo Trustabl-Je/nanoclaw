@@ -19,7 +19,7 @@
  * dependency pins before authentication.
  */
 import { buildContainerImage } from './lib/container-build.js';
-import { HOST_RESTART_COMMAND, HOST_RESTART_ONLY_COMMAND, readHostSettings, restartHost } from './lib/host-restart.js';
+import { HOST_RESTART_COMMAND, readHostSettings, restartHost } from './lib/host-restart.js';
 import * as p from '@clack/prompts';
 import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
@@ -121,7 +121,8 @@ export async function run(args: string[]): Promise<void> {
   await entry.runAuth();
   await entry.runInstallCheck?.();
   // Auth may save settings the host reads only at start (OpenCode's endpoint).
-  // Settings the host reads at start changed: reload them even if a build fails.
+  // A failed build can still emit dist/ (tsc has no noEmitOnError), so this
+  // builds and refuses to restart onto a failed build, as the install path does.
   if (!restartFailed && readHostSettings() !== settings) {
     // A host restart adopts running agent containers, which keep the settings
     // they started with until they restart.
@@ -136,13 +137,7 @@ const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
 
 function restartHostFor(name: string, opts: { settingsOnly?: boolean } = {}): 'restarted' | 'no-service' | 'failed' {
   console.log(`Restarting NanoClaw so the running host loads ${name}…`);
-  const restart = restartHost(process.cwd(), { build: opts.settingsOnly ? 'try' : true });
-  if (restart.status !== 'failed' && restart.buildFailed) {
-    // The running build may predate this provider; the settings reload still helps.
-    console.error(
-      `Couldn't rebuild NanoClaw (${restart.buildFailed}); restarting the existing build so it reads the new settings. After fixing the build, run: ${HOST_RESTART_COMMAND}`,
-    );
-  }
+  const restart = restartHost();
   if (restart.status === 'restarted') return 'restarted';
   if (restart.status === 'no-service') {
     // Nothing failed: the service step starts the build made above. A host
@@ -159,7 +154,7 @@ function restartHostFor(name: string, opts: { settingsOnly?: boolean } = {}): 'r
   // Auth only talks to the gateway, so it still runs; the exit code reports
   // the restart the operator has to finish by hand.
   console.error(
-    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${opts.settingsOnly ? HOST_RESTART_ONLY_COMMAND : HOST_RESTART_COMMAND}`,
+    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
   );
   process.exitCode = 1;
   return 'failed';
