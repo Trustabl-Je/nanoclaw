@@ -437,13 +437,9 @@ function killOrphanedProcesses(projectRoot: string): void {
 }
 
 /**
- * Detect stale docker group membership in the user systemd session.
- *
- * When a user is added to the docker group mid-session, the user systemd
- * daemon (user@UID.service) keeps the old group list from login time.
- * Docker works in the terminal but not in the service context.
- *
- * Only relevant on Linux with user-level systemd (not root, not macOS, not WSL nohup).
+ * The shell reaches Docker but the user systemd manager does not, i.e. the
+ * docker group was added after the manager started. Called only for a
+ * non-root systemd user service; root and the nohup fallback skip it.
  */
 function checkDockerGroupStale(): boolean {
   if (userManagerReachesDocker()) return false;
@@ -485,13 +481,20 @@ function sudoNonInteractive(args: string[], timeout: number): boolean {
   }
 }
 
+interface DockerAccess {
+  stale: boolean;
+  setfaclMissing?: boolean;
+  /** The ACL went on but the user manager still can't reach Docker. */
+  aclApplied?: boolean;
+}
+
 /**
  * Let the user service reach Docker when the docker group was added after the
- * user systemd manager started. Reports whether it is still stale, and whether
- * setfacl is missing so the wizard can print commands that work.
+ * user systemd manager started. Reports what is still wrong so the wizard can
+ * print commands that fit.
  */
-function repairDockerGroupAccess(): { stale: boolean; setfaclMissing: boolean } {
-  if (!checkDockerGroupStale()) return { stale: false, setfaclMissing: false };
+function repairDockerGroupAccess(): DockerAccess {
+  if (!checkDockerGroupStale()) return { stale: false };
   log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
 
   // Minimal Debian/Ubuntu images ship without the acl package.
@@ -505,14 +508,14 @@ function repairDockerGroupAccess(): { stale: boolean; setfaclMissing: boolean } 
   }
 
   if (!sudoNonInteractive(['setfacl', '-m', `u:${os.userInfo().username}:rw`, DOCKER_SOCKET], 15_000)) {
-    return { stale: true, setfaclMissing: false };
+    return { stale: true };
   }
   if (!userManagerReachesDocker()) {
     log.warn('Applied ACL to the Docker socket, but the user service still cannot reach Docker');
-    return { stale: true, setfaclMissing: false };
+    return { stale: true, aclApplied: true };
   }
   log.info(`Applied temporary ACL to ${DOCKER_SOCKET} (resets on docker restart or reboot)`);
-  return { stale: false, setfaclMissing: false };
+  return { stale: false };
 }
 
 export function renderSystemdUnit(
@@ -585,7 +588,7 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
   // group added mid-session doesn't reach the service. A socket ACL bridges
   // that until dockerd recreates the socket (restart or reboot); after a
   // reboot the manager starts with the docker group.
-  const dockerAccess = runningAsRoot ? { stale: false, setfaclMissing: false } : repairDockerGroupAccess();
+  const dockerAccess: DockerAccess = runningAsRoot ? { stale: false } : repairDockerGroupAccess();
 
   // Kill orphaned nanoclaw processes to avoid channel connection conflicts
   killOrphanedProcesses(projectRoot);
@@ -643,6 +646,7 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     SERVICE_LOADED: serviceLoaded,
     ...(dockerAccess.stale ? { DOCKER_GROUP_STALE: true } : {}),
     ...(dockerAccess.setfaclMissing ? { SETFACL_MISSING: true } : {}),
+    ...(dockerAccess.aclApplied ? { DOCKER_ACL_APPLIED: true } : {}),
     ...proxyStatusFields,
     LINGER_ENABLED: !runningAsRoot,
     STATUS: 'success',

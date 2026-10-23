@@ -109,6 +109,7 @@ describe('user service and a docker group added mid-session', () => {
     expect(fields()).toMatchObject({ SERVICE_TYPE: 'systemd-user', STATUS: 'success' });
     expect(fields()).not.toHaveProperty('DOCKER_GROUP_STALE');
     expect(fields()).not.toHaveProperty('SETFACL_MISSING');
+    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
   });
 
   it('fails fast without a cached sudo ticket and reports setfacl as missing', async () => {
@@ -116,6 +117,16 @@ describe('user service and a docker group added mid-session', () => {
     await run([]);
     expect(sudoCalls()).toEqual([aptCommand]);
     expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, SETFACL_MISSING: true, STATUS: 'success' });
+    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
+  });
+
+  it('does not report the ACL as applied when setfacl itself fails', async () => {
+    sys.setfacl = true;
+    sys.sudoCached = false;
+    await run([]);
+    expect(sudoCalls()).toEqual([aclCommand()]);
+    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true });
+    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
   });
 
   it('keeps the flag when the ACL is applied but the user manager still cannot reach Docker', async () => {
@@ -123,7 +134,7 @@ describe('user service and a docker group added mid-session', () => {
     sys.aclReaches = false;
     await run([]);
     expect(sudoCalls()).toEqual([aclCommand()]);
-    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true });
+    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, DOCKER_ACL_APPLIED: true });
     expect(fields()).not.toHaveProperty('SETFACL_MISSING');
   });
 

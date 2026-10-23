@@ -545,7 +545,7 @@ async function main(): Promise<void> {
     }
     const dockerFix = dockerAccessHint(res.terminal?.fields ?? {}, getSystemdUnit());
     if (dockerFix) {
-      p.log.warn(brandBody("NanoClaw can't reach Docker yet. To fix it now, run:"));
+      p.log.warn(brandBody(dockerFix.title));
       p.log.message(brandBody(dockerFix.commands.map((c) => `  ${c}`).join('\n')));
       p.log.message(brandBody(dockerFix.note));
     }
