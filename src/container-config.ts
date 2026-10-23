@@ -464,16 +464,9 @@ function writeContainerJsonNoFollow(dir: string, name: string, data: string): vo
     fd = fs.openSync(p, O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      const created = fs.openSync(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o666);
-      try {
-        fs.writeFileSync(created, data);
-      } finally {
-        fs.closeSync(created);
-      }
-      return;
-    }
-    if (code === 'ELOOP' || code === 'ENXIO' || code === 'EISDIR') return replacePlanted();
+    // No entry (ENOENT) and a non-regular leaf (symlink/FIFO/dir) share the
+    // create-fresh path; replacePlanted's unlink ignores ENOENT.
+    if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENXIO' || code === 'EISDIR') return replacePlanted();
     throw err;
   }
   // `closed` guards the fd against a double close: once closed here, the

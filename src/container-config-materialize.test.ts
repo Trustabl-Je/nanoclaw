@@ -88,6 +88,23 @@ describe('materializeContainerJson writes the leaf without following links', () 
     expect(fs.lstatSync(p).isFile()).toBe(true);
   });
 
+  it('replaces a FIFO that has a reader (open succeeds, file-type check routes it)', async () => {
+    const p = await group('fifo-reader');
+    execFileSync('mkfifo', [p]);
+    // Hold a reader open so the writer's O_WRONLY|O_NONBLOCK open succeeds and
+    // the fstat-not-a-regular-file branch (not the open-error branch) runs.
+    const reader = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      await materializeContainerJson('ag-fifo-reader');
+    } finally {
+      fs.closeSync(reader);
+    }
+
+    expect(fs.lstatSync(p).isFIFO()).toBe(false);
+    expect(fs.lstatSync(p).isFile()).toBe(true);
+    expect(() => JSON.parse(fs.readFileSync(p, 'utf8'))).not.toThrow();
+  });
+
   it('never deletes outside files when container.json is a planted directory', async () => {
     const p = await group('dir');
     const outside = path.join(TEST_ROOT, 'outside-dir');
