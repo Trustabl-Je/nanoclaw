@@ -15,6 +15,8 @@ import path from 'path';
 
 /** What an operator runs by hand when the automatic reload fails. */
 export const HOST_RESTART_COMMAND = 'pnpm run build && bash setup/lib/restart.sh';
+/** The same without the build, for a restart that only reloads `.env`. */
+export const HOST_RESTART_ONLY_COMMAND = 'bash setup/lib/restart.sh';
 
 /** `no-service`: nothing runs this checkout's host, so there is nothing to reload. */
 export type HostRestartResult =
@@ -31,10 +33,14 @@ export function readHostSettings(projectRoot: string = process.cwd()): string {
   }
 }
 
-/** Rebuild the host and restart its service. Synchronous with inherited output. */
-export function restartHost(projectRoot: string = process.cwd()): HostRestartResult {
+/**
+ * Rebuild the host and restart its service. Synchronous with inherited output.
+ * `build: false` only restarts: a settings change needs no build, and an
+ * unrelated build break must not block it.
+ */
+export function restartHost(projectRoot: string = process.cwd(), opts: { build?: boolean } = {}): HostRestartResult {
   const steps: Array<[string, string[]]> = [
-    ['pnpm', ['run', 'build']],
+    ...(opts.build === false ? [] : [['pnpm', ['run', 'build']] as [string, string[]]]),
     ['bash', ['setup/lib/restart.sh']],
   ];
   for (const [command, args] of steps) {

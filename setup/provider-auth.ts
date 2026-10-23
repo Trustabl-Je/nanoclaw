@@ -19,7 +19,7 @@
  * dependency pins before authentication.
  */
 import { buildContainerImage } from './lib/container-build.js';
-import { HOST_RESTART_COMMAND, readHostSettings, restartHost } from './lib/host-restart.js';
+import { HOST_RESTART_COMMAND, HOST_RESTART_ONLY_COMMAND, readHostSettings, restartHost } from './lib/host-restart.js';
 import * as p from '@clack/prompts';
 import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
@@ -87,7 +87,7 @@ export async function run(args: string[]): Promise<void> {
     }
     // Before auth: a failed sign-in exits the process, and a re-run finds the
     // provider registered and only re-authenticates, so it never restarts.
-    if (hostChanged) restartFailed = !restartHostFor(name);
+    if (hostChanged) restartFailed = restartHostFor(name) !== 'restarted';
     // This process imported src/provider-contracts/index.ts at startup, and
     // ESM caches the barrel, so a line appended to it now never evaluates
     // here; load the contract module directly before the auth step asks the
@@ -121,35 +121,40 @@ export async function run(args: string[]): Promise<void> {
   await entry.runAuth();
   await entry.runInstallCheck?.();
   // Auth may save settings the host reads only at start (OpenCode's endpoint).
+  // Only .env changed here (any host code was built above), so restart without a build.
   if (!restartFailed && readHostSettings() !== settings) {
-    restartHostFor(name);
-    // A host restart, by service or by hand, adopts running agent containers,
-    // which keep the settings they started with until they restart.
-    console.log(
-      `Agents already running keep their old ${name} settings until they restart: bin/ncl groups restart --id <group-id>`,
-    );
+    // A host restart adopts running agent containers, which keep the settings
+    // they started with until they restart.
+    if (restartHostFor(name, { settingsOnly: true }) !== 'no-service') console.log(AGENTS_KEEP_SETTINGS(name));
   }
 }
 
+const AGENTS_KEEP_SETTINGS = (name: string) =>
+  `Agents already running keep their old ${name} settings until they restart: bin/ncl groups restart --id <group-id>`;
+
 const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
 
-function restartHostFor(name: string): boolean {
+function restartHostFor(name: string, opts: { settingsOnly?: boolean } = {}): 'restarted' | 'no-service' | 'failed' {
   console.log(`Restarting NanoClaw so the running host loads ${name}…`);
-  const restart = restartHost();
-  if (restart.status === 'restarted') return true;
+  const restart = restartHost(process.cwd(), { build: !opts.settingsOnly });
+  if (restart.status === 'restarted') return 'restarted';
   if (restart.status === 'no-service') {
     // Nothing failed: the service step starts the build made above. A host
-    // started by hand is not a service, so name it in the same line.
+    // started by hand is not a service, so name it in the same line, with its
+    // running agents when only settings changed.
+    const byHand = opts.settingsOnly
+      ? 'or restart a host you started by hand, then its running agents: bin/ncl groups restart --id <group-id>'
+      : 'or restart a host you started by hand';
     console.log(
-      `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (or restart a host you started by hand).`,
+      `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (${byHand}).`,
     );
-    return false;
+    return 'no-service';
   }
   // Auth only talks to the gateway, so it still runs; the exit code reports
   // the restart the operator has to finish by hand.
   console.error(
-    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
+    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${opts.settingsOnly ? HOST_RESTART_ONLY_COMMAND : HOST_RESTART_COMMAND}`,
   );
   process.exitCode = 1;
-  return false;
+  return 'failed';
 }

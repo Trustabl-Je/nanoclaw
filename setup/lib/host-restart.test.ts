@@ -41,6 +41,11 @@ describe.runIf(process.platform !== 'win32')('host restart', () => {
     const root = checkout(0, 1);
     expect(restartHost(root)).toEqual({ status: 'failed', message: 'bash setup/lib/restart.sh exited 1' });
   });
+  it('restarts without building when only settings changed', () => {
+    const root = checkout(2, 0);
+    expect(restartHost(root, { build: false })).toEqual({ status: 'restarted' });
+    expect(ran(root)).toEqual(['restart']);
+  });
   it('tells a missing service apart from a failed restart', () => {
     const root = checkout(0, 2);
     expect(restartHost(root)).toEqual({ status: 'no-service' });
