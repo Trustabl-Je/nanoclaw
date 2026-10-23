@@ -236,7 +236,7 @@ cd container/agent-runner && bun test      # Container tests (bun:test)
 
 Container typecheck is a separate tsconfig — if you edit `container/agent-runner/src/`, run `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` from root (or `bun run typecheck` from `container/agent-runner/`).
 
-Service management (`<slug>` is per checkout; `source setup/lib/install-slug.sh && systemd_unit` prints the unit name):
+Service management (`<slug>` is per checkout; from the project root, `source setup/lib/install-slug.sh && systemd_unit` prints the unit name):
 ```bash
 # Any platform: restart this checkout's host and wait until it answers
 bash setup/lib/restart.sh
