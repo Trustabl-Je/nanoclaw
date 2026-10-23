@@ -113,12 +113,16 @@ const lookupAll: Lookup = async (host) => (await dns.promises.lookup(host, { all
  * The shell command that saves GATEWAY_BASE_URL and recreates the onecli
  * service alone on the tag, bind and ports it runs with now: the installer may
  * not have saved them, and compose's defaults are `latest` and loopback. A
- * failed read or a non-stock image stops the chain before anything changes.
+ * failed read, a non-stock image or an unpinned tag (compose pulls `latest`
+ * anew; picking a version here could downgrade) stops the chain before
+ * anything changes.
  */
 export function gatewayRecreateCommand(host: string): string {
   return (
     `cd ~/.onecli && img="$(docker inspect -f '{{.Config.Image}}' onecli)" && ` +
     'v="${img#ghcr.io/onecli/onecli:}" && [ "$v" != "$img" ] && ' +
+    'case "$v" in [0-9]*.[0-9]*.[0-9]*|*sha256:*) ;; *) echo "onecli runs $img, not a pinned release: ' +
+    'recreate it on one first (docs/onecli-upgrades.md in NanoClaw), then run this again" >&2; false ;; esac && ' +
     'gw="$(docker port onecli 10255/tcp | head -n1)" && app="$(docker port onecli 10254/tcp | head -n1)" && ' +
     '[ -n "$gw" ] && [ -n "$app" ] && ' +
     `printf '\\nGATEWAY_BASE_URL=%s\\n' "${host}:\${gw##*:}" >> .env && ` +

@@ -292,6 +292,7 @@ describe('gatewayRecreateCommand', () => {
       });
       return {
         status: res.status,
+        stderr: res.stderr,
         env: fs.readFileSync(path.join(home, '.onecli', '.env'), 'utf-8'),
         compose: fs.existsSync(log) ? fs.readFileSync(log, 'utf-8').trim() : null,
       };
@@ -319,6 +320,36 @@ describe('gatewayRecreateCommand', () => {
       app: '10.0.0.5:10254',
     });
     expect(res.compose).toBe('compose up -d --no-deps onecli | 1.45.0@sha256:abc 10.0.0.5 10255 10254');
+  });
+
+  it('leaves an unpinned gateway alone even with a pin in .env, which may be stale', () => {
+    const res = runRecreate(
+      { image: 'ghcr.io/onecli/onecli:latest', gw: '10.0.0.5:10255', app: '10.0.0.5:10254' },
+      'ONECLI_VERSION=1.42.0\n',
+    );
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain('onecli-upgrades.md');
+    expect(res.env).toBe('ONECLI_VERSION=1.42.0\n');
+    expect(res.compose).toBeNull();
+  });
+
+  it('keeps a digest pin on any tag', () => {
+    const res = runRecreate({
+      image: 'ghcr.io/onecli/onecli:latest@sha256:abc',
+      gw: '10.0.0.5:10255',
+      app: '10.0.0.5:10254',
+    });
+    expect(res.compose).toBe('compose up -d --no-deps onecli | latest@sha256:abc 10.0.0.5 10255 10254');
+  });
+
+  it('changes nothing for an unpinned tag, which compose would pull anew', () => {
+    for (const image of ['ghcr.io/onecli/onecli:latest', 'ghcr.io/onecli/onecli:1.45']) {
+      const res = runRecreate({ image, gw: '10.0.0.5:10255', app: '10.0.0.5:10254' });
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain('not a pinned release');
+      expect(res.env).toBe('POSTGRES_PASSWORD=pw');
+      expect(res.compose).toBeNull();
+    }
   });
 
   it('changes nothing when a read fails or the image is not the stock one', () => {
