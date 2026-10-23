@@ -64,6 +64,11 @@ describe('remoteProxyHint', () => {
     }
   });
 
+  it("warns when a remote gateway hands out an address of the agent's own host", () => {
+    const hint = remoteProxyHint(GATEWAY, config('172.17.0.1:10255'), [], own);
+    expect(hint).toContain('172.17.0.1:10255');
+  });
+
   it('keeps a hostname that is not plain out of the shell command', () => {
     const hint = remoteProxyHint('http://$(id).example:10254', config('host.docker.internal:10255'), [], own) ?? '';
     expect(hint).not.toContain('$(id)');
@@ -270,7 +275,13 @@ describe('checkRemoteProxy', () => {
 
 describe('gatewayRecreateCommand', () => {
   // Runs the command for real against a stub docker, in a scratch HOME.
-  function runRecreate(docker: { image?: string; gw?: string; app?: string }, env = 'POSTGRES_PASSWORD=pw') {
+  // loadsEnv: whether the compose file passes ~/.onecli/.env into the container
+  // (the 1.45 installer's does; older layouts load only ../.env).
+  function runRecreate(
+    docker: { image?: string; gw?: string; app?: string; loadsEnv?: boolean },
+    env = 'POSTGRES_PASSWORD=pw',
+    runs = 1,
+  ) {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-recreate-'));
     try {
       fs.mkdirSync(path.join(home, '.onecli'));
@@ -282,14 +293,18 @@ describe('gatewayRecreateCommand', () => {
         'case "$1" in',
         `  inspect) ${docker.image ? `echo '${docker.image}'` : 'exit 1'} ;;`,
         `  port) [ "$3" = 10255/tcp ] && printf '${docker.gw ?? ''}' || printf '${docker.app ?? ''}' ;;`,
+        `  exec) ${docker.loadsEnv === false ? 'true' : 'sed -n \'s/^GATEWAY_BASE_URL=//p\' "$HOME/.onecli/.env" | tail -n1'} ;;`,
         `  *) echo "$* | $ONECLI_VERSION $ONECLI_BIND_HOST $ONECLI_GATEWAY_PORT $ONECLI_APP_PORT" > '${log}' ;;`,
         'esac',
       ].join('\n');
       fs.writeFileSync(path.join(home, 'bin', 'docker'), stub, { mode: 0o755 });
-      const res = spawnSync('/bin/sh', ['-c', gatewayRecreateCommand('192.168.107.212')], {
-        encoding: 'utf-8',
-        env: { PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, HOME: home },
-      });
+      let res = spawnSync('/bin/true');
+      for (let i = 0; i < runs; i++) {
+        res = spawnSync('/bin/sh', ['-c', gatewayRecreateCommand('192.168.107.212')], {
+          encoding: 'utf-8',
+          env: { PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, HOME: home },
+        });
+      }
       return {
         status: res.status,
         stderr: res.stderr,
@@ -311,6 +326,28 @@ describe('gatewayRecreateCommand', () => {
     // A last line without a newline is not glued to the new one.
     expect(res.env).toBe('POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=192.168.107.212:11255\n');
     expect(res.compose).toBe('compose up -d --no-deps onecli | 1.45.0 0.0.0.0 11255 11254');
+  });
+
+  it('replaces an earlier GATEWAY_BASE_URL line instead of adding another', () => {
+    const res = runRecreate(
+      { image: 'ghcr.io/onecli/onecli:1.45.0', gw: '10.0.0.5:10255', app: '10.0.0.5:10254' },
+      'POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=old:1\n',
+      2,
+    );
+    expect(res.status).toBe(0);
+    expect(res.env).toBe('POSTGRES_PASSWORD=pw\nGATEWAY_BASE_URL=192.168.107.212:10255\n');
+  });
+
+  it('fails loudly when the value does not reach the container', () => {
+    const res = runRecreate({
+      image: 'ghcr.io/onecli/onecli:1.45.0',
+      gw: '10.0.0.5:10255',
+      app: '10.0.0.5:10254',
+      loadsEnv: false,
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain('environment:');
+    expect(res.stderr).toContain('GATEWAY_BASE_URL');
   });
 
   it('keeps a digest-pinned tag whole', () => {

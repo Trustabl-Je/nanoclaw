@@ -115,7 +115,8 @@ const lookupAll: Lookup = async (host) => (await dns.promises.lookup(host, { all
  * not have saved them, and compose's defaults are `latest` and loopback. A
  * failed read, a non-stock image or an unpinned tag (compose pulls `latest`
  * anew; picking a version here could downgrade) stops the chain before
- * anything changes.
+ * anything changes. Older compose files don't pass ~/.onecli/.env into the
+ * container, so it ends by reading the value back from inside it.
  */
 export function gatewayRecreateCommand(host: string): string {
   return (
@@ -125,9 +126,16 @@ export function gatewayRecreateCommand(host: string): string {
     'recreate it on one first (docs/onecli-upgrades.md in NanoClaw), then run this again" >&2; false ;; esac && ' +
     'gw="$(docker port onecli 10255/tcp | head -n1)" && app="$(docker port onecli 10254/tcp | head -n1)" && ' +
     '[ -n "$gw" ] && [ -n "$app" ] && ' +
-    `printf '\\nGATEWAY_BASE_URL=%s\\n' "${host}:\${gw##*:}" >> .env && ` +
+    `val="${host}:\${gw##*:}" && ` +
+    `case "$val" in *'<'*) echo 'Replace <gateway-host> with this host address first' >&2; false ;; esac && ` +
+    "(umask 077 && touch .env && { grep -v '^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=' .env; " +
+    'echo "GATEWAY_BASE_URL=$val"; } > .env.new && cat .env.new > .env && rm .env.new) && ' +
     'ONECLI_VERSION="$v" ONECLI_BIND_HOST="${gw%:*}" ONECLI_GATEWAY_PORT="${gw##*:}" ' +
-    'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli'
+    'ONECLI_APP_PORT="${app##*:}" docker compose up -d --no-deps onecli && ' +
+    '{ [ "$(docker exec onecli printenv GATEWAY_BASE_URL)" = "$val" ] || { echo ' +
+    "'GATEWAY_BASE_URL did not reach the onecli container: its compose file does not load ~/.onecli/.env. " +
+    "Add GATEWAY_BASE_URL: ${GATEWAY_BASE_URL} under the onecli service environment:, then run this again' >&2; " +
+    'false; }; }'
   );
 }
 
@@ -143,7 +151,8 @@ export function remoteProxyHint(
   own: readonly string[] = ownAddresses(),
 ): string | null {
   const proxy = advertisedProxy(config);
-  if (!proxy || !isAgentLocal(proxy.hostname)) return null;
+  // An address of this host is the agent's own machine too (e.g. its docker bridge).
+  if (!proxy || !(isAgentLocal(proxy.hostname) || isThisMachine(proxy.hostname, own))) return null;
   const gatewayHost = new URL(gatewayUrl).hostname;
   if ([gatewayHost, ...gatewayAddresses].some((h) => isThisMachine(h, own))) return null;
   const port = proxy.port || '80';
@@ -154,8 +163,8 @@ export function remoteProxyHint(
     `The remote OneCLI gateway tells agents to use the proxy ${proxy.hostname}:${port}, their own machine, ` +
     'so model calls will hang with no reply. On the gateway host, set GATEWAY_BASE_URL to its own address and ' +
     `the gateway port it publishes, and recreate the onecli service as it runs now: ${recreate}. ` +
-    `If its compose file does not load ~/.onecli/.env, set GATEWAY_BASE_URL=${host}:<published gateway port> ` +
-    "in the onecli service's environment instead. Re-run setup to check."
+    'The command checks the value inside the container and says what to change if it did not arrive. ' +
+    'Re-run setup to check.'
   );
 }
 
