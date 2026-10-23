@@ -37,12 +37,16 @@ const compose145 = `services:
     environment:
       APP_URL: \${APP_URL:-http://\${ONECLI_BIND_HOST:-127.0.0.1}:\${ONECLI_APP_PORT:-10254}}
       GATEWAY_API_URL: http://\${ONECLI_BIND_HOST:-127.0.0.1}:\${ONECLI_GATEWAY_PORT:-10255}
+      INTERNAL_API_URL: http://localhost:10254
 `;
 
-const compose142 = compose145.replace(
-  'APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}',
-  'APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}',
-);
+// 1.42 builds APP_URL from the bind and has no INTERNAL_API_URL.
+const compose142 = compose145
+  .replace(
+    'APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}',
+    'APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}',
+  )
+  .replace('      INTERNAL_API_URL: http://localhost:10254\n', '');
 
 const BRIDGE_URL = 'http://172.17.0.1:10254';
 const GATEWAY_LINE = '- "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"';
@@ -62,9 +66,13 @@ describe('pinAdminToLoopback', () => {
     expect(pinAdminToLoopback(compose145).compose).toContain(
       'APP_URL: "${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}"',
     );
-    expect(pinAdminToLoopback(compose142).compose).toContain(
-      'APP_URL: "${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}"',
-    );
+  });
+
+  it('keeps APP_URL fixed on loopback when the gateway has no INTERNAL_API_URL', () => {
+    const { compose } = pinAdminToLoopback(compose142);
+    // The container's own port: 1.42 calls this URL from inside the container.
+    expect(compose).toContain('APP_URL: "http://127.0.0.1:10254"');
+    expect(compose).not.toContain('${APP_URL:-');
   });
 
   it('rewrites service ports while leaving unused YAML entries unchanged', () => {
@@ -141,9 +149,7 @@ describe('pinAdminToLoopback', () => {
     const changed = compose145.replace(/    environment:[\s\S]*/, `    environment: { APP_URL: "${BRIDGE_URL}" }\n`);
     const result = pinAdminToLoopback(changed);
     expect(result.status).toBe('pinned');
-    expect(parse(result.compose).services.onecli.environment.APP_URL).toBe(
-      '${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}',
-    );
+    expect(parse(result.compose).services.onecli.environment.APP_URL).toBe('http://127.0.0.1:10254');
   });
 
   it('pins CRLF Compose files and preserves their line endings', () => {

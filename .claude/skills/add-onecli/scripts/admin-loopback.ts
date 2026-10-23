@@ -88,7 +88,13 @@ export function pinAdminToLoopback(compose: string): { compose: string; status: 
     edits.push({
       start: appUrl.range[0],
       end: appUrl.range[1],
-      value: JSON.stringify('${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}'),
+      // Without INTERNAL_API_URL (1.42) OneCLI calls its own API through
+      // APP_URL from inside the container: fixed, on the container's port.
+      value: JSON.stringify(
+        services.onecli.environment?.INTERNAL_API_URL === undefined
+          ? 'http://127.0.0.1:10254'
+          : '${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}',
+      ),
     });
   }
   let next = normalized;

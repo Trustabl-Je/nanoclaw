@@ -342,11 +342,12 @@ export function configureLocalGateway(
       adminUrl = installer.origin;
       // Keep a public APP_URL (tunnel, proxy, domain); replace only the installer's bridge URL.
       const envFile = path.join(dir, '.env');
+      // The shell wins over .env, as in Compose; save the result so later
+      // `docker compose up -d` runs keep it.
       const savedAppUrl = readSavedEnv(envFile).APP_URL;
-      const appUrl = savedAppUrl ?? process.env.APP_URL;
+      const appUrl = process.env.APP_URL || savedAppUrl;
       if (!appUrl || sameOrigin(appUrl, installerUrl)) writeEnvVar('APP_URL', adminUrl, envFile);
-      // Save a shell-only one, so later `docker compose up -d` runs keep it.
-      else if (savedAppUrl === undefined && isHttpUrl(appUrl)) writeEnvVar('APP_URL', appUrl, envFile);
+      else if (appUrl !== savedAppUrl && isHttpUrl(appUrl)) writeEnvVar('APP_URL', appUrl, envFile);
     }
   }
   if (next === current) return adminUrl;

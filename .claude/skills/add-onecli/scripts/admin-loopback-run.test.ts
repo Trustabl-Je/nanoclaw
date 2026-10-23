@@ -26,6 +26,7 @@ const compose = `services:
       - "\${ONECLI_BIND_HOST:-127.0.0.1}:\${ONECLI_GATEWAY_PORT:-10255}:10255"
     environment:
       APP_URL: \${APP_URL:-http://\${ONECLI_BIND_HOST:-127.0.0.1}:\${ONECLI_APP_PORT:-10254}}
+      INTERNAL_API_URL: http://localhost:10254
 `;
 const bridgeUrl = 'http://172.17.0.1:10254';
 let cli: boolean;
@@ -256,6 +257,32 @@ describe('fresh gateway setup', () => {
     expect(endpoint).toBe('http://127.0.0.1:10254');
   });
 
+  it('prefers a public shell APP_URL over a saved bridge one, as Compose does', async () => {
+    const publicUrl = 'https://onecli.example.com';
+    fs.appendFileSync(path.join(dir, '.env'), `APP_URL=${bridgeUrl}\n`);
+    vi.stubEnv('APP_URL', publicUrl);
+    const { run } = await import('./setup.js');
+    await run([]);
+    expect(started.services.onecli.environment.APP_URL).toBe(publicUrl);
+    expect(parseEnv(fs.readFileSync(path.join(dir, '.env'), 'utf8')).APP_URL).toBe(publicUrl);
+  });
+
+  it('keeps a 1.42 gateway on a loopback APP_URL even when .env saves a public one', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'docker-compose.yml'),
+      compose
+        .replace(
+          /^      APP_URL:.*$/m,
+          '      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}',
+        )
+        .replace(/^      INTERNAL_API_URL:.*\n/m, ''),
+    );
+    fs.appendFileSync(path.join(dir, '.env'), 'APP_URL=https://onecli.example.com\n');
+    const { run } = await import('./setup.js');
+    await run([]);
+    expect(started.services.onecli.environment.APP_URL).toBe('http://127.0.0.1:10254');
+  });
+
   it('warns and completes fresh setup when setting the CLI api-host fails', async () => {
     configSetFails = true;
     const { run } = await import('./setup.js');
@@ -281,6 +308,9 @@ describe('published-port verification guide', () => {
     expect(section).toContain('Re-running the upstream OneCLI installer');
     expect(section).toContain('`APP_URL: ${APP_URL:-http://127.0.0.1:<admin port>}`');
     expect(section).toContain('`APP_URL=http://127.0.0.1:<admin port>`');
+    expect(section).toContain('`APP_URL: http://127.0.0.1:10254`');
+    expect(section).not.toContain('`APP_URL: http://127.0.0.1:<admin port>`');
+    expect(section).toContain('`INTERNAL_API_URL`');
     expect(section).toContain('unless it already sets a public `APP_URL`');
     expect(section).toContain('cd ~/.onecli && env -u ONECLI_VERSION docker compose up -d');
     expect(section).toContain("NanoClaw's `.env` `ONECLI_URL`");
