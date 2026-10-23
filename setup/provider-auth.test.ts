@@ -225,12 +225,34 @@ describe('standalone provider setup flow', () => {
       'restart-host',
     ]);
   });
-  it('does not restart for settings auth saved when no payload was applied', async () => {
+  // Re-authenticating an installed provider can save a new endpoint; the
+  // running host still holds the old one until it restarts.
+  it('restarts after a re-auth that changed the settings the host reads at start', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     fixture.auth.mockImplementationOnce(async () => {
       fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
     });
     await run(['opencode']);
+    expect(fixture.order).toEqual(['auth', 'restart-host']);
+    expect(process.exitCode).toBeUndefined();
+    // Running agent containers keep the settings they started with.
+    expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
+  });
+  it('does not restart a re-auth that left those settings unchanged', async () => {
+    await run(['opencode']);
     expect(fixture.order).toEqual(['auth']);
+  });
+  it('says so, without failing, when a re-auth changed settings and no service is installed', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fixture.restart = { status: 'no-service' };
+    fixture.auth.mockImplementationOnce(async () => {
+      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
+    });
+    await run(['opencode']);
+    expect(fixture.order).toEqual(['auth', 'restart-host']);
+    expect(log.mock.calls.flat().join('\n')).toContain('No NanoClaw service is installed');
+    expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
+    expect(process.exitCode).toBeUndefined();
   });
   // What counts as a host change is applyProviderSkill's call (install.test.ts).
   it('rebuilds the image but leaves the host alone when the apply changed no host files', async () => {

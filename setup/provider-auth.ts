@@ -10,9 +10,9 @@
  * runAuth short-circuits when its secret already exists) — and unlike
  * re-running full setup, it touches nothing else: no install-wide default
  * provider rewrite. An install that changes host code also rebuilds the host
- * and restarts the service, so the running host knows the provider (and again
- * after auth when auth saved settings the host reads at start);
- * reauthenticating an installed provider restarts nothing. Provider install
+ * and restarts the service, so the running host knows the provider. Any run,
+ * re-authentication included, restarts after auth when auth saved settings
+ * the host reads at start (OpenCode's endpoint). Provider install
  * skills call this as their auth step so there is exactly one auth
  * implementation per provider.
  * Pass --refresh to intentionally replace the installed payload and update its
@@ -42,8 +42,9 @@ export async function run(args: string[]): Promise<void> {
   }
 
   let entry = getSetupProvider(name);
-  // Set when this run restarted the host onto a payload it installed.
-  let restarted = false;
+  // An install-time restart that found no service, or failed, has already
+  // told the operator; a second attempt after auth would only repeat it.
+  let restartFailed = false;
   const skillDir = getInstallableProviderDescriptor(name)?.skillDir;
   if (refresh && !skillDir) throw new Error(`Provider '${name}' has no install skill to refresh.`);
   if (skillDir && (!entry || refresh)) {
@@ -86,7 +87,7 @@ export async function run(args: string[]): Promise<void> {
     }
     // Before auth: a failed sign-in exits the process, and a re-run finds the
     // provider registered and only re-authenticates, so it never restarts.
-    if (hostChanged) restarted = restartHostFor(name);
+    if (hostChanged) restartFailed = !restartHostFor(name);
     // This process imported src/provider-contracts/index.ts at startup, and
     // ESM caches the barrel, so a line appended to it now never evaluates
     // here; load the contract module directly before the auth step asks the
@@ -116,11 +117,18 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const settings = restarted ? readHostSettings() : undefined;
+  const settings = readHostSettings();
   await entry.runAuth();
   await entry.runInstallCheck?.();
   // Auth may save settings the host reads only at start (OpenCode's endpoint).
-  if (settings !== undefined && readHostSettings() !== settings) restartHostFor(name);
+  if (!restartFailed && readHostSettings() !== settings) {
+    restartHostFor(name);
+    // A host restart, by service or by hand, adopts running agent containers,
+    // which keep the settings they started with until they restart.
+    console.log(
+      `Agents already running keep their old ${name} settings until they restart: bin/ncl groups restart --id <group-id>`,
+    );
+  }
 }
 
 const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
