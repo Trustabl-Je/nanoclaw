@@ -89,10 +89,15 @@ The pinned gateway has no hand-written rules. Access is set per agent:
   Allow, Ask or Never. Set it in the console (the agent's page, **Manage
   permissions** on the connection) or with
   `onecli agents grants attach-connection --id <agent-id> --connection-id <connection-id> --allow <tool>,<tool> --ask <tool>`;
-  `onecli apps permission-definition` lists the tool IDs. An Ask tool is held
-  and NanoClaw sends the approval card. Once you pick tools, every tool you did
-  not list, and every tool added to the catalog later, is Never. Full access
-  (every tool Allow) keeps new tools allowed.
+  `onecli apps permission-definition --provider <provider>` lists the tool
+  IDs. An Ask tool is held and NanoClaw sends the approval card. Once you pick
+  tools, every tool you did not list, and every tool added to the catalog
+  later, is Never. Full access (attach with no `--allow` or `--ask`) keeps new
+  tools allowed; setting every tool back to Allow in the console after
+  customizing does not. The gateway tells tools apart only by host, method and
+  path, so tools that share one (GitHub's GraphQL query and mutation tools are
+  both `POST /graphql`) all get the most permissive of their settings: Allow
+  beats Ask, Ask beats Never.
 - **Plain vault keys** (HubSpot, Dial, Exa, any host with no catalog app): on
   or off per agent, nothing more. Use `attach-secret` (above) or the switch on
   the agent's page. The key's host and path patterns decide which requests get
