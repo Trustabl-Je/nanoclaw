@@ -4,6 +4,7 @@
  * @chat-adapter/gchat converter renders it, so the test sees the
  * textParagraph HTML Google Chat receives.
  */
+import { generateKeyPairSync } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -40,6 +41,13 @@ vi.mock('../webhook-server.js', () => ({ registerWebhookAdapter: vi.fn() }));
 
 import { escapeGChatHtml } from './gchat.js';
 
+// The factory refuses credentials without a real RSA key.
+const { privateKey } = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+});
+
 describe('escapeGChatHtml', () => {
   it('entity-escapes &, < and >, ampersand first', () => {
     expect(escapeGChatHtml('a & <b> &lt;')).toBe('a &amp; &lt;b&gt; &amp;lt;');
@@ -59,7 +67,11 @@ describe('Google Chat approval card text', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-card-text-'));
     fs.writeFileSync(
       path.join(dir, '.env'),
-      `GCHAT_CREDENTIALS=${JSON.stringify({ client_email: 'bot@example.iam.gserviceaccount.com', private_key: 'unused' })}\n`,
+      [
+        `GCHAT_CREDENTIALS=${JSON.stringify({ client_email: 'bot@example.iam.gserviceaccount.com', private_key: privateKey })}`,
+        'GOOGLE_CHAT_ENDPOINT_URL=https://chat.example.com/webhook/gchat',
+        'GOOGLE_CHAT_PROJECT_NUMBER=123456789012',
+      ].join('\n') + '\n',
     );
     vi.spyOn(process, 'cwd').mockReturnValue(dir);
     bridge = (await registered.get('gchat')!.factory())!;

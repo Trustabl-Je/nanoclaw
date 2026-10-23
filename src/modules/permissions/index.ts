@@ -665,7 +665,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         err,
       });
-      awaitingNameInput.delete(row.approver_user_id);
+      // A newer prompt (a refused name's re-arm, or another channel's) may have replaced this one.
+      if (awaitingNameInput.get(row.approver_user_id) === prompt) awaitingNameInput.delete(row.approver_user_id);
       return 'ignored';
     }
     return 'accepted';
@@ -750,7 +751,7 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
 /**
  * The name reply's work. Reading the row, creating the agent and wiring run in the
  * registration's turn, so a button click can't connect or reject it in between;
- * the reply to the approver goes out after the turn.
+ * the replies to the approver go out after the turn.
  */
 async function createFromNameReply(
   event: InboundEvent,
@@ -761,17 +762,49 @@ async function createFromNameReply(
   const turn = await onRegistration(pending.channelMgId, async () => {
     const row = await getPendingChannelApproval(pending.channelMgId);
     if (!row) return undefined;
-    const ag = await createNewAgentGroup(text);
+    const created = await createNewAgentGroup(text);
+    if (typeof created === 'string') return { row, refused: created };
     log.info('Channel registration: new agent group created', {
       messagingGroupId: row.messaging_group_id,
-      agentGroupId: ag.id,
-      agentName: ag.name,
-      folder: ag.folder,
+      agentGroupId: created.id,
+      agentName: created.name,
+      folder: created.folder,
     });
-    return { row, ag, wired: await wireApprovedChannel(row, ag.id, userId) };
+    return { row, ag: created, wired: await wireApprovedChannel(row, created.id, userId) };
   });
   if (turn && 'wired' in turn && turn.wired === 'accepted') await replayRegisteredMessage(turn.row);
   if (!turn) return true;
+  const { row } = turn;
+
+  if ('refused' in turn) {
+    const adapter = getDeliveryAdapter();
+    if (!adapter) return true;
+    // Nothing was written; re-arm so the approver's next reply is the name, unless they opened
+    // another channel's prompt meanwhile. A fresh object, so only this re-arm's failure can drop it.
+    const rearmed = awaitingNameInput.has(userId) ? undefined : { ...pending };
+    if (rearmed) awaitingNameInput.set(userId, rearmed);
+    try {
+      await adapter.deliver(
+        event.channelType,
+        event.platformId,
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          text: `⚠️ Cannot create agent "${text}": ${turn.refused}. Nothing was created.${rearmed ? ' Reply with another name:' : ''}`,
+        }),
+        undefined,
+        event.instance,
+      );
+    } catch (err) {
+      log.error('Channel registration: name re-prompt delivery failed', {
+        messagingGroupId: row.messaging_group_id,
+        err,
+      });
+      // A newer prompt may have replaced ours while this was in flight.
+      if (awaitingNameInput.get(userId) === rearmed) awaitingNameInput.delete(userId);
+    }
+    return true;
+  }
   const { ag, wired } = turn;
 
   const adapter = getDeliveryAdapter();
