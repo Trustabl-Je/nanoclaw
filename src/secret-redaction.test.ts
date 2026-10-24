@@ -1,24 +1,33 @@
 import { describe, expect, it } from 'vitest';
 
-import { createLineRedactor, isSecretName, redactSecrets } from './secret-redaction.js';
+import { createLineRedactor, isSecretName, maskSecretValue, redactSecrets } from './secret-redaction.js';
 
 // Fakes are assembled at runtime so no key-shaped literal sits in the source.
 const fake = (prefix: string, body: string): string => prefix + body;
 const A = (n: number): string => 'A'.repeat(n);
+// Random-looking payloads, the same every run: gitleaks rules skip low-entropy fakes.
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+let seed = 7;
+const rand = (n: number, chars = ALNUM): string =>
+  Array.from({ length: n }, () => {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31;
+    return chars[Math.floor((seed / 2 ** 31) * chars.length)];
+  }).join('');
+const digits = (n: number): string => rand(n, '0123456789');
 
 const FAKES = {
   anthropic: fake('sk-ant-api03-', `TESTKEY${A(40)}`),
   openai: fake('sk-proj-', `TESTKEY${A(40)}`),
-  githubClassic: fake('ghp_', `TESTTOKEN${A(27)}`),
-  githubOauth: fake('gho_', `TESTTOKEN${A(27)}`),
-  githubFine: fake('github_pat_', `TESTTOKEN${A(70)}`),
-  slackBot: fake('xoxb-', `0000000000-0000000000000-TESTTOKEN${A(15)}`),
-  slackUser: fake('xoxp-', `0000000000-0000000000000-TESTTOKEN${A(15)}`),
+  githubClassic: fake('ghp_', rand(36)),
+  githubOauth: fake('gho_', rand(36)),
+  githubFine: fake('github_pat_', rand(82, `${ALNUM}_`)),
+  slackBot: fake('xoxb-', `${digits(10)}-${digits(13)}-${rand(24)}`),
+  slackUser: fake('xoxp-', `${digits(10)}-${digits(12)}-${digits(13)}-${rand(32)}`),
   slackApp: fake('xapp-', `1-A0000000000-0000000000000-TESTTOKEN${A(40)}`),
-  aws: fake('AKIA', 'TESTTESTTESTTEST'),
+  aws: fake('AKIA', rand(16, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')),
   telegram: fake('123456789:', `TESTTOKEN${A(26)}`),
   discord: fake('MTE', `${A(23)}.TESTAA.TESTTOKEN${A(29)}`),
-  google: fake('AIza', `TESTKEY${A(28)}`),
+  google: fake('AIza', rand(35, `${ALNUM}_-`)),
   jwt: fake('eyJ', `hbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.TESTSIGNATURE${A(20)}`),
 };
 
@@ -143,7 +152,7 @@ describe('redactSecrets: review cases', () => {
 
   it('finds a token wrapped in ANSI colour codes', () => {
     const out = redactSecrets(`\x1b[32m${FAKES.githubClassic}\x1b[0m`);
-    expect(out).toBe('\x1b[32mghp_[REDACTED]…AAAA\x1b[0m');
+    expect(out).toBe(`\x1b[32mghp_[REDACTED]…${FAKES.githubClassic.slice(-4)}\x1b[0m`);
   });
 
   it('does not let a prose word hide the assignment after it', () => {
@@ -206,11 +215,11 @@ describe('redactSecrets: hints, AWS names, plain values', () => {
   it('keeps the issuer prefix and last 4 of a prefixed key, nothing else', () => {
     expect(redactSecrets(`auth failed for ${key}`)).toBe('auth failed for sk-ant-api03-[REDACTED]…WXYZ');
     expect(redactSecrets(`ANTHROPIC_API_KEY=${key}`)).toBe('ANTHROPIC_API_KEY=sk-ant-api03-[REDACTED]…WXYZ');
-    expect(redactSecrets(`token ${fake('ghp_', `${'x'.repeat(32)}Q1w2`)}`)).toBe('token ghp_[REDACTED]…Q1w2');
+    expect(redactSecrets(`token ${fake('ghp_', `${rand(32)}Q1w2`)}`)).toBe('token ghp_[REDACTED]…Q1w2');
   });
 
   it('masks a prefixed key whole when fewer than 16 characters would stay hidden', () => {
-    expect(redactSecrets(`slack ${fake('xoxb-', '0123456789AB')}`)).toBe('slack [REDACTED]');
+    expect(redactSecrets(`aws ${FAKES.aws}`)).toBe('aws [REDACTED]');
   });
 
   it('shows no characters of a value found only by its name or shape', () => {
@@ -235,7 +244,7 @@ describe('redactSecrets: hints, AWS names, plain values', () => {
   });
 
   it('masks a Google API key', () => {
-    expect(redactSecrets(`GOOGLE ${FAKES.google} end`)).toBe('GOOGLE AIza[REDACTED]…AAAA end');
+    expect(redactSecrets(`GOOGLE ${FAKES.google} end`)).toBe(`GOOGLE AIza[REDACTED]…${FAKES.google.slice(-4)} end`);
   });
 
   it.each(['token: not configured', 'ANTHROPIC_API_KEY=undefined', 'password: missing', 'apiKey: null'])(
@@ -336,4 +345,165 @@ describe('isSecretName', () => {
   it.each(['key', 'maxTokens', 'tokenCount', 'keyId', 'secretName', 'authMode'])('passes %s', (name) =>
     expect(isSecretName(name)).toBe(false),
   );
+});
+
+describe('redactSecrets: keys only the gitleaks list knows', () => {
+  const lower = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  it.each([
+    ['Stripe', fake('sk_live_', rand(24)), 'sk_live'],
+    ['GitLab', fake('glpat-', rand(20)), 'glpat-'],
+    ['npm', fake('npm_', rand(36, lower)), 'npm_'],
+    ['Hugging Face', fake('hf_', rand(34, ALNUM.slice(0, 52))), 'hf_'],
+  ])('masks a %s key and keeps its issuer prefix', (_issuer, key, prefix) => {
+    expect(redactSecrets(`push failed: ${key} was rejected`)).toBe(
+      `push failed: ${prefix}[REDACTED]…${key.slice(-4)} was rejected`,
+    );
+  });
+
+  it('finds a key that ends at URL punctuation, not only at a space or quote', () => {
+    const url = `https://generativelanguage.googleapis.test/v1/models/m:generate?key=${FAKES.google}&alt=sse`;
+    expect(redactSecrets(url)).not.toContain(FAKES.google);
+    expect(redactSecrets(`(${FAKES.githubFine})`)).not.toContain(FAKES.githubFine);
+  });
+});
+
+/** ~10k ordinary log lines (host log, setup and step output), the same every run. */
+function normalLogLines(count = 10_000): string[] {
+  let s = 11;
+  const next = (): number => (s = (s * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+  const n = (max: number): number => Math.floor(next() * max);
+  const pick = <T>(xs: readonly T[]): T => xs[n(xs.length)];
+  const hex = (len: number): string => Array.from({ length: len }, () => '0123456789abcdef'[n(16)]).join('');
+  const uuid = (): string => `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`;
+  const time = (): string =>
+    `[${[n(24), n(60), n(60)].map((v) => String(v).padStart(2, '0')).join(':')}.${String(n(1000)).padStart(3, '0')}]`;
+  const lines: Array<() => string> = [
+    () =>
+      `${time()} INFO Message received channel=${pick(['telegram', 'discord', 'slack'])} chatId=-100${n(1e9)} length=${n(400)}`,
+    () =>
+      `${time()} INFO Container started name=nanoclaw-${pick(['main', 'ops'])}-${hex(8)} image=nanoclaw-agent:latest durationMs=${n(9000)}`,
+    () =>
+      `${time()} DEBUG Routing {"messageId":"${uuid()}","agentGroupId":"${uuid()}","platform":"${pick(['discord', 'slack'])}","threadId":"${n(1e9)}${n(1e9)}"}`,
+    () => `${time()} WARN Delivery retry attempt=${n(5)} sessionId=${uuid()} error="ECONNRESET" nextInMs=${n(30000)}`,
+    () =>
+      `${time()} ERROR Send failed err={ type: "Error", message: "Request failed with status code ${pick([429, 500])}", stack: Error: Request failed\\n    at dispatch (/app/node_modules/chat/dist/index.js:${n(4000)}:${n(80)}) }`,
+    () => `GET https://api.github.com/repos/nanocoai/nanoclaw/pulls/${n(5000)}?per_page=100 200 ${n(900)}ms`,
+    () => `Progress: resolved ${n(900)}, reused ${n(900)}, downloaded 0, added ${n(900)}, done`,
+    () => `+ @anthropic-ai/claude-agent-sdk 0.2.${n(90)}`,
+    () =>
+      `#${n(30)} [stage-1 ${n(9)}/9] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git`,
+    () => `#${n(30)} writing image sha256:${hex(64)} done`,
+    () => `HEAD is now at ${hex(9)} fix(setup): restart the service after a re-auth`,
+    () => `${time()} INFO Updated .env key=TELEGRAM_BOT_TOKEN existed=${pick(['true', 'false'])}`,
+    () => `${time()} DEBUG Session ${uuid()} wrote ${n(5)} messages to outbound.db (${n(90000)} bytes)`,
+    () => `${time()} INFO Scheduled task fired taskId=${uuid()} cron="0 9 * * 1-5" nextRun=2026-10-24T09:00:00.000Z`,
+    () =>
+      `${time()} INFO Turn done input_tokens=${n(90000)} output_tokens=${n(4000)} cache_read_input_tokens=${n(90000)} max_tokens=8192`,
+    () => `npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported`,
+    () => `${time()} INFO OneCLI gateway healthy url=http://127.0.0.1:${n(60000)} latencyMs=${n(40)}`,
+    () => `✓ src/${pick(['router', 'delivery', 'host-sweep'])}.test.ts (${n(60)} tests) ${n(900)}ms`,
+    () => `${time()} WARN token expired for agent group ${uuid()}; ask the owner for a new one`,
+    () =>
+      `  at Object.<anonymous> (/Users/sam/nanoclaw/src/${pick(['index', 'container-runner'])}.ts:${n(900)}:${n(60)})`,
+  ];
+  return Array.from({ length: count }, () => pick(lines)());
+}
+
+describe('redactSecrets: ordinary log volume', () => {
+  const corpus = normalLogLines();
+
+  it('leaves 10k ordinary log lines unchanged', () => {
+    expect(corpus.filter((line) => redactSecrets(line) !== line)).toEqual([]);
+  });
+
+  it('costs well under 50 µs a line', () => {
+    for (const line of corpus.slice(0, 1000)) redactSecrets(line);
+    const start = performance.now();
+    for (const line of corpus) redactSecrets(line);
+    expect(((performance.now() - start) * 1000) / corpus.length).toBeLessThan(50);
+  });
+});
+
+describe('redactSecrets: gitleaks rules in escaped text', () => {
+  const stripe = fake('sk_live_', rand(24));
+  it.each([
+    ['after a JSON-escaped line end', () => JSON.stringify({ stderr: `line\n${FAKES.aws}` }), FAKES.aws],
+    ['after a JSON-escaped tab', () => JSON.stringify({ x: `a\t${FAKES.google}` }), FAKES.google],
+    ['after an ANSI colour code', () => `\x1b[32m${FAKES.aws}\x1b[0m`, FAKES.aws],
+    ['after a JSON-escaped ANSI colour code', () => JSON.stringify({ s: `\x1b[31m${stripe}` }), stripe],
+    ['inside JSON nested in JSON', () => JSON.stringify({ body: JSON.stringify({ k: FAKES.google }) }), FAKES.google],
+    ['inside JSON nested in JSON, Stripe', () => JSON.stringify({ body: JSON.stringify({ k: stripe }) }), stripe],
+  ])('finds a key %s', (_where, text, key) => {
+    expect(redactSecrets(text())).not.toContain(key);
+  });
+
+  it('never shows a word that named the key as its prefix', () => {
+    const key = `datadog${rand(33, 'abcdefghijklmnopqrstuvwxyz0123456789')}`;
+    expect(redactSecrets(`datadog_api_token = "${key}"`)).toBe('datadog_api_token = "[REDACTED]"');
+    expect(redactSecrets(`DD ${key}`)).toBe(`DD ${key}`);
+  });
+});
+
+describe('redactSecrets: gitleaks review', () => {
+  it('masks the whole key where a rule captures only part of it', () => {
+    const encoded = fake('ZXlK', `aGJHY2lPaU${'Ab9Xq1'.repeat(20)}`);
+    expect(redactSecrets(`jwt ${encoded}`)).not.toContain('Ab9Xq1Ab9Xq1');
+    const id = (): string =>
+      `${rand(8, 'abcdef0123456789')}-${rand(4)}-${rand(4)}-${rand(4)}-${rand(12)}`.toLowerCase();
+    const secret = rand(32, 'abcdef0123456789');
+    const teams = `https://acme.webhook.office.com/webhookb2/${id()}@${id()}/IncomingWebhook/${secret}/${id()}`;
+    expect(redactSecrets(`posting to ${teams}`)).not.toContain(secret);
+  });
+
+  it('masks a longer key whole when a shorter rule matches its start', () => {
+    const routable = fake('glpat-', 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4.a12345678');
+    expect(redactSecrets(`token ${routable} ok`)).toBe('token glpat-[REDACTED]…5678 ok');
+    const longer = fake('ghp_', rand(44));
+    expect(redactSecrets(longer)).toBe(`ghp_[REDACTED]…${longer.slice(-4)}`);
+  });
+
+  it('masks a Slack token of any layout whole', () => {
+    const legacy = fake('xoxa-', '2-511111111-31111111111-31111111111111-e039d02840a0b9379c');
+    expect(redactSecrets(legacy)).toBe('xoxa-[REDACTED]…379c');
+  });
+
+  it('masks a JWT with short segments', () => {
+    const jwt = fake('eyJ', 'hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmno');
+    expect(redactSecrets(`token ${jwt}`)).toBe('token [REDACTED]');
+  });
+
+  it('keeps the prefix hint for a secret-named field holding a key from the gitleaks list', () => {
+    const key = fake('glpat-', rand(20));
+    expect(maskSecretValue(key)).toBe(`glpat-[REDACTED]…${key.slice(-4)}`);
+    expect(maskSecretValue(`${key} and more`)).toBe('[REDACTED]');
+  });
+
+  it('shows only fixed issuer text as a prefix, never payload that looks like a keyword', () => {
+    const payload = `jira${rand(16)}${rand(4, 'abcdef0123456789')}`;
+    expect(redactSecrets(`atlassian = ${payload}`)).toBe('atlassian = [REDACTED]');
+    const infix = `atlasv1${rand(7)}.atlasv1.${rand(70)}`;
+    expect(redactSecrets(infix)).toBe('[REDACTED]');
+  });
+
+  it.each(['|next', '\\/next', '<next', '@host'])('finds a key followed by %s', (after) => {
+    expect(redactSecrets(`${FAKES.google}${after}`)).toBe(`AIza[REDACTED]…${FAKES.google.slice(-4)}${after}`);
+  });
+
+  it('masks a GitHub token of any length and the rest of a longer key', () => {
+    const short = fake('ghp_', rand(20));
+    expect(redactSecrets(`t ${short}`)).toBe(`t ghp_[REDACTED]…${short.slice(-4)}`);
+    const fine = fake('github_pat_', rand(20));
+    expect(redactSecrets(`t ${fine}`)).toBe(`t github_pat_[REDACTED]…${fine.slice(-4)}`);
+    const gitlab = fake('glpat-', `${rand(20)}-SECRETTAIL`);
+    expect(redactSecrets(`t ${gitlab}`)).toBe('t glpat-[REDACTED]…TAIL');
+  });
+
+  it('masks a key that merely contains an allowlisted word', () => {
+    const key = fake('glpat-', `${rand(6)}false${rand(9)}`);
+    expect(redactSecrets(`t ${key}`)).toBe(`t glpat-[REDACTED]…${key.slice(-4)}`);
+  });
+
+  it('finds a key that ends a sentence', () => {
+    expect(redactSecrets(`bad key ${FAKES.google}.`)).toBe(`bad key AIza[REDACTED]…${FAKES.google.slice(-4)}.`);
+  });
 });

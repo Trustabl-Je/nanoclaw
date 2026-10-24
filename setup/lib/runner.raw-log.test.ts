@@ -8,7 +8,7 @@ vi.mock('./claude-handoff.js', () => ({ offerClaudeOnFailure: vi.fn() }));
 vi.mock('./diagnostics.js', () => ({ emit: vi.fn() }));
 import { spawnQuiet } from './runner.js';
 
-const token = ['ghp', `TESTTOKEN${'A'.repeat(27)}`].join('_');
+const token = ['ghp', 'T3stT0kenQ9wErTy5uIoP1aSdFgH2jKlZx8C'].join('_');
 
 async function rawLogOf(script: string, env: Record<string, string> = {}): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'raw-log-'));

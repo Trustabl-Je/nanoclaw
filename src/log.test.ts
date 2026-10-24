@@ -206,7 +206,7 @@ describe('log redacts secrets', () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  const token = ['ghp', `TESTTOKEN${'A'.repeat(27)}`].join('_');
+  const token = ['ghp', 'T3stT0kenQ9wErTy5uIoP1aSdFgH2jKlZx8C'].join('_');
 
   it('from the message', () => {
     log.info(`cloning https://x-access-token:${token}@github.test/repo.git`);
