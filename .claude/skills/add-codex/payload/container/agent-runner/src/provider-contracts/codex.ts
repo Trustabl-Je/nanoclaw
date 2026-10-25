@@ -44,6 +44,7 @@ export const codexRuntimeContract: ProviderRuntimeContract & {
   },
   lifecycle: { beforeQuery: writeCodexRuntimeFiles },
   history: { afterExchange: archiveCodexExchange },
+  toolSearch: { mode: 'native' },
   textDelivery: 'result',
   commands: { formatting: 'xml' },
 };

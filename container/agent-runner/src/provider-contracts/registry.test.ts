@@ -77,7 +77,9 @@ describe('provider runtime contracts', () => {
     expect(asConstant(contract?.configuration.memory)).toEqual({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
     expect(typeof contract?.lifecycle?.memorySessionHookRegistration).toBe('function');
     expect(typeof contract?.history?.readTrace).toBe('function');
-    expect(contract?.history?.afterExchange).toBeUndefined();
+    expect(typeof contract?.history?.afterExchange).toBe('function');
+    expect(typeof contract?.history?.toolSearchUses).toBe('function');
+    expect(contract?.toolSearch).toEqual({ mode: 'native', switch: { env: 'ENABLE_TOOL_SEARCH' } });
     expect(contract?.textDelivery).toBe('mid-turn-complete');
     expect(contract?.commands.formatting).toBe('native');
     expect(contract?.seamVersion).toBe(PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION);

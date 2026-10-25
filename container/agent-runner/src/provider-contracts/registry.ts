@@ -10,6 +10,7 @@
  */
 
 import type { McpServerConfig, ProviderExchange, ProviderSpeed } from '../providers/types.js';
+import type { ToolSearchCapability, ToolSearchUse } from './tool-search.js';
 
 export const PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION = 1;
 
@@ -99,6 +100,8 @@ export interface RuntimeHistoryCallbacks {
   afterExchange?(input: RuntimeAfterExchangeInput, fx: RuntimeCallbackEffects): string | null;
   /** Provider-owned trace lookup for diagnostics (`/upload-trace`). */
   readTrace?(): string | null;
+  /** The tool searches the harness made, read from the trace at `trace`. */
+  toolSearchUses?(trace: string): ToolSearchUse[];
 }
 
 export interface ProviderRuntimeContract {
@@ -109,6 +112,8 @@ export interface ProviderRuntimeContract {
   lifecycle?: RuntimeLifecycleCallbacks;
   /** Provider-owned history hooks; core only decides when to invoke them. */
   history?: RuntimeHistoryCallbacks;
+  /** Whether the harness searches its MCP tools instead of loading every schema, and its one switch. */
+  toolSearch?: ToolSearchCapability;
   textDelivery: 'mid-turn-complete' | 'result';
   commands: {
     formatting: 'native' | 'xml';

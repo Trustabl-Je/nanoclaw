@@ -43,6 +43,7 @@ import { createProvider } from './providers/factory.js';
 import { getProviderRuntimeContract, requireProviderName } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
+import { announceToolSearch } from './provider-contracts/tool-search.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -117,6 +118,14 @@ async function main(): Promise<void> {
         : `Additional MCP server: ${name} (${serverConfig.command})`,
     );
   }
+
+  announceToolSearch(
+    providerName,
+    getProviderRuntimeContract(providerName)?.toolSearch,
+    Object.keys(mcpServers),
+    process.env,
+    log,
+  );
 
   const provider = createProvider(providerName, {
     assistantName: config.assistantName || undefined,

@@ -8,6 +8,11 @@ import {
   resolveClaudeMemoryRuntime,
 } from '../providers/claude-config.js';
 import { claudeConfigDirectory, newestClaudeTranscript } from '../providers/claude-history.js';
+import {
+  CLAUDE_TOOL_SEARCH,
+  readClaudeToolSearchUses,
+  recordClaudeToolSearch,
+} from '../providers/claude-tool-search.js';
 
 import { registerProviderContract } from '../providers/provider-registry.js';
 import {
@@ -38,7 +43,12 @@ export const claudeRuntimeContract: ProviderRuntimeContract = {
   lifecycle: { memorySessionHookRegistration: writeMemorySessionHook },
   // Pre-compact archiving and continuation rotation are provider-internal
   // (providers/claude-history.ts); core only needs the trace lookup.
-  history: { readTrace: newestClaudeTranscript },
+  history: {
+    readTrace: newestClaudeTranscript,
+    toolSearchUses: readClaudeToolSearchUses,
+    afterExchange: recordClaudeToolSearch,
+  },
+  toolSearch: CLAUDE_TOOL_SEARCH,
   textDelivery: 'mid-turn-complete',
   // Aliases are listed with their command, as in the host contract.
   commands: {

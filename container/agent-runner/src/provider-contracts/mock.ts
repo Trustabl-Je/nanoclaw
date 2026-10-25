@@ -19,6 +19,7 @@ export const mockRuntimeContract: ProviderRuntimeContract = {
     executionPolicy: { constant: { sandbox: 'none' } },
   },
   textDelivery: 'mid-turn-complete',
+  toolSearch: { mode: 'none' },
   commands: { formatting: 'xml' },
 };
 
