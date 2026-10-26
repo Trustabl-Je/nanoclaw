@@ -78,6 +78,8 @@ const MAX_CAUSE_DEPTH = 32;
 
 interface TransientFailure {
   retryAfterMs?: number;
+  /** Part of the reply is already posted and a retry posts it again. */
+  partial?: boolean;
 }
 
 /**
@@ -99,6 +101,11 @@ function transientFailure(err: unknown): TransientFailure | null {
     chain.push(link);
     e = link.originalError ?? link.cause;
   }
+  const failure = transientCause(chain);
+  return failure && chain.some((link) => link.code === 'PARTIAL_SEND') ? { ...failure, partial: true } : failure;
+}
+
+function transientCause(chain: Record<string, unknown>[]): TransientFailure | null {
   const limited = chain.find((link) => link.code === 'RATE_LIMITED');
   if (limited) {
     const retryAfterMs =
@@ -444,7 +451,9 @@ async function drainSession(session: Session): Promise<void> {
       const transient = destination ? transientFailure(err) : null;
       const record = await recordAttemptRow(msg.id, session.id, err, transient);
       const attempts = record?.attempts ?? null;
-      const maxAttempts = transient ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
+      // A reply split into chunks reposts its sent chunks on every retry, so a
+      // partly sent one keeps the short cap: still backed off, posted ≤3 times.
+      const maxAttempts = transient && !transient.partial ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
       if (attempts !== null && attempts >= maxAttempts) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,

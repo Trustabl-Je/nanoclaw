@@ -24,6 +24,15 @@ vi.mock('./config.js', async () => {
   };
 });
 
+vi.mock('./webhook-server.js', () => ({ registerWebhookAdapter: vi.fn() }));
+
+const agentRoute = vi.hoisted(() => ({ fail: undefined as (() => Error) | undefined }));
+vi.mock('./modules/agent-to-agent/agent-route.js', () => ({
+  routeAgentMessage: vi.fn(async () => {
+    if (agentRoute.fail) throw agentRoute.fail();
+  }),
+}));
+
 const TEST_DIR = '/tmp/nanoclaw-test-delivery-backoff';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
@@ -31,7 +40,10 @@ import { getDb, hasTable } from './db/connection.js';
 import { getDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession } from './session-manager.js';
-import { deliverSessionMessages, deliverToSessions, setDeliveryAdapter } from './delivery.js';
+import { deliverSessionMessages, deliverToSessions, registerDeliveryAction, setDeliveryAdapter } from './delivery.js';
+import { createChatSdkBridge } from './channels/chat-sdk-bridge.js';
+import { unguarded } from './guard/types.js';
+import type { Adapter, AdapterPostableMessage } from 'chat';
 
 const T0 = new Date('2030-01-01T00:00:00.000Z').getTime();
 
@@ -364,7 +376,7 @@ describe('review round 1', () => {
     expect(sent).toEqual(['bad', 'next']);
   });
 
-  it('a cause chain that loops, or is too deep to read, counts as permanent', async () => {
+  it('a looping cause chain is read once and stays transient; one too deep to read counts as permanent', async () => {
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound(session.id, 'loop', 'teams:conv-1', 'loop');
     insertOutbound(session.id, 'deep', 'teams:conv-2', 'deep');
@@ -388,5 +400,160 @@ describe('review round 1', () => {
     expect((await getDeliveryAttempt('loop'))?.next_attempt_at).toBe(new Date(T0 + 2_000).toISOString());
     // A chain cut short is never assumed transient.
     expect((await getDeliveryAttempt('deep'))?.next_attempt_at).toBeNull();
+  });
+});
+
+/** A row of any kind and channel, for the rows the backoff must leave alone. */
+function insertRow(sessionId: string, msgId: string, kind: string, channelType: string | null, content: object): void {
+  const db = new Database(outboundDbPath('ag-1', sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, datetime('now'), ?, ?, ?, ?)`,
+  ).run(msgId, kind, channelType ? 'teams:conv-1' : null, channelType, JSON.stringify(content));
+  db.close();
+}
+
+/**
+ * The real Chat SDK bridge over a Telegram-shaped adapter: replies longer than
+ * 40 characters go out as chunks, and `refuse(chunk)` decides each post.
+ */
+function splittingChannel(refuse: (chunk: string) => Error | undefined): string[] {
+  const posted: string[] = [];
+  const adapter = {
+    name: 'telegram',
+    postMessage: async (threadId: string, message: AdapterPostableMessage) => {
+      const chunk = (message as { markdown: string }).markdown;
+      const refusal = refuse(chunk);
+      if (refusal) throw refusal;
+      posted.push(chunk);
+      return { id: `plat-${posted.length}`, threadId, raw: {} };
+    },
+  } as unknown as Adapter;
+  const bridge = createChatSdkBridge({ adapter, supportsThreads: false, maxTextLength: 40 });
+  // What the channel registry does for each send.
+  setDeliveryAdapter({
+    deliver: (_channelType, platformId, threadId, kind, content, files) =>
+      bridge.deliver(platformId, threadId, { kind, content: JSON.parse(content), files }),
+  });
+  return posted;
+}
+
+const SPLIT_REPLY = ['first', 'second', 'third'].map((word) => word.padEnd(30, '.')).join('\n\n');
+
+function telegramRateLimited(): Error {
+  return Object.assign(new Error('Rate limited by telegram'), {
+    name: 'AdapterRateLimitError',
+    code: 'RATE_LIMITED',
+    adapter: 'telegram',
+    retryAfter: 3,
+  });
+}
+
+describe('review round 2', () => {
+  it('a reply split into chunks whose later chunk is throttled posts its first chunk at most 3 times', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'long', 'teams:conv-1', SPLIT_REPLY);
+    const posted = splittingChannel((chunk) => (chunk.startsWith('second') ? telegramRateLimited() : undefined));
+
+    for (let s = 0; s <= 120; s += 3) {
+      at(s * 1000);
+      await deliverSessionMessages(session);
+    }
+    expect(posted.filter((chunk) => chunk.startsWith('first'))).toHaveLength(3);
+    expect(status(session.id, 'long')).toBe('failed');
+  });
+
+  it('a partly sent reply still waits out the Retry-After, and is delivered whole once the chunk goes through', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'long', 'teams:conv-1', SPLIT_REPLY);
+    insertOutbound(session.id, 'after', 'teams:conv-1', 'after');
+    let refusals = 2;
+    const posted = splittingChannel((chunk) =>
+      chunk.startsWith('second') && refusals-- > 0 ? telegramRateLimited() : undefined,
+    );
+
+    await deliverSessionMessages(session);
+    expect((await getDeliveryAttempt('long'))?.next_attempt_at).toBe(new Date(T0 + 3_000).toISOString());
+    at(2_999);
+    await deliverSessionMessages(session);
+    // Held: neither a repost nor the next message to the same chat.
+    expect(posted).toHaveLength(1);
+    at(3_000);
+    await deliverSessionMessages(session);
+    at(6_000);
+    await deliverSessionMessages(session);
+    expect(status(session.id, 'long')).toBe('delivered');
+    expect(posted.map((chunk) => chunk.split('.')[0])).toEqual(['first', 'first', 'first', 'second', 'third', 'after']);
+  });
+
+  it('caps a long Retry-After at 5 minutes', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'out-1', 'teams:conv-1', 'reply');
+    scriptedAdapter(new Map([['reply', () => rateLimited(3_600)]]), new Map([['reply', 1]]));
+
+    await deliverSessionMessages(session);
+    expect((await getDeliveryAttempt('out-1'))?.next_attempt_at).toBe(new Date(T0 + 300_000).toISOString());
+  });
+
+  it('an HTTP 408 is transient', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'slow', 'teams:conv-1', 'slow');
+    scriptedAdapter(
+      new Map([['slow', () => Object.assign(new Error('Request Timeout'), { status: 408 })]]),
+      new Map([['slow', 1]]),
+    );
+
+    await deliverSessionMessages(session);
+    expect((await getDeliveryAttempt('slow'))?.next_attempt_at).toBe(new Date(T0 + 2_000).toISOString());
+  });
+
+  it('a Teams NetworkError whose status sits only in innerHttpError.statusCode is read as that status', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'bad', 'teams:conv-1', 'bad');
+    const inner = Object.assign(new Error('Bad Request'), { innerHttpError: { statusCode: 400 } });
+    scriptedAdapter(
+      new Map([
+        [
+          'bad',
+          () =>
+            Object.assign(new Error('Teams API error during postMessage: Bad Request'), {
+              name: 'NetworkError',
+              code: 'NETWORK_ERROR',
+              originalError: inner,
+            }),
+        ],
+      ]),
+      new Map([['bad', 1]]),
+    );
+
+    await deliverSessionMessages(session);
+    expect((await getDeliveryAttempt('bad'))?.next_attempt_at).toBeNull();
+  });
+
+  it('system and agent rows keep the 3-attempt cap and no backoff, even on a network error', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const reset = () => Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    registerDeliveryAction(
+      'test_flaky_action',
+      async () => {
+        throw reset();
+      },
+      unguarded('test action'),
+    );
+    agentRoute.fail = reset;
+    insertRow(session.id, 'sys', 'system', 'teams', { action: 'test_flaky_action' });
+    insertRow(session.id, 'a2a', 'chat', 'agent', { text: 'hi' });
+    scriptedAdapter(new Map(), new Map());
+    try {
+      await deliverSessionMessages(session);
+      expect((await getDeliveryAttempt('sys'))?.next_attempt_at).toBeNull();
+      expect((await getDeliveryAttempt('a2a'))?.next_attempt_at).toBeNull();
+      await deliverSessionMessages(session);
+      await deliverSessionMessages(session);
+      expect(status(session.id, 'sys')).toBe('failed');
+      expect(status(session.id, 'a2a')).toBe('failed');
+    } finally {
+      agentRoute.fail = undefined;
+    }
   });
 });
