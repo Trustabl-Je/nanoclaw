@@ -272,11 +272,6 @@ export async function getDeliveryAttempt(messageId: string): Promise<DeliveryAtt
   return getDb().get<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE message_id = ?', messageId);
 }
 
-/** Hold a message after a transient failure: delivery skips it until `nextAttemptAt`. */
-export async function setDeliveryRetryAt(messageId: string, nextAttemptAt: string): Promise<void> {
-  await getDb().run('UPDATE delivery_attempts SET next_attempt_at = ? WHERE message_id = ?', nextAttemptAt, messageId);
-}
-
 /** A session's messages still backing off at `now`. */
 export async function listDeliveryBackoffs(sessionId: string, now: string): Promise<Set<string>> {
   const rows = await getDb().all<{ message_id: string }>(

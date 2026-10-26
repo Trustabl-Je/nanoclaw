@@ -27,9 +27,9 @@ import {
 } from './db/messaging-groups.js';
 import {
   clearDeliveryAttempt,
+  getDeliveryAttempt,
   listDeliveryBackoffs,
   recordDeliveryAttempt,
-  setDeliveryRetryAt,
 } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
@@ -73,22 +73,32 @@ function httpStatus(err: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
+/** Deep enough for any real wrapper chain; a longer one is not trusted. */
+const MAX_CAUSE_DEPTH = 32;
+
+interface TransientFailure {
+  retryAfterMs?: number;
+}
+
 /**
- * Milliseconds to wait before retrying a send that may succeed later, or null
- * for a permanent failure. Transient: a rate limit (Chat SDK code
- * RATE_LIMITED, honouring its Retry-After), HTTP 408/429/5xx, or a network
- * error. An HTTP status anywhere in the cause chain decides before the
- * error's name, because adapters wrap a 400 in a NetworkError. Unknown errors
- * stay permanent, so a deterministic failure can never wedge a destination.
+ * Null for a permanent failure. Transient: a rate limit (Chat SDK code
+ * RATE_LIMITED, with its Retry-After), HTTP 408/429/5xx, or a network error.
+ * An HTTP status anywhere in the cause chain decides before the error's name,
+ * because adapters wrap a 400 in a NetworkError. Unknown errors, and chains
+ * too deep to read whole, stay permanent: a deterministic failure must never
+ * wedge a conversation.
  */
-function transientRetryDelayMs(err: unknown, attempts: number): number | null {
+function transientFailure(err: unknown): TransientFailure | null {
   const chain: Record<string, unknown>[] = [];
-  for (let e: unknown = err; e && typeof e === 'object' && chain.length < 4; ) {
+  const seen = new Set<unknown>();
+  let e: unknown = err;
+  while (e && typeof e === 'object' && !seen.has(e)) {
+    if (chain.length === MAX_CAUSE_DEPTH) return null;
+    seen.add(e);
     const link = e as Record<string, unknown>;
     chain.push(link);
     e = link.originalError ?? link.cause;
   }
-  const backoff = Math.min(TRANSIENT_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_MAX_DELAY_MS);
   const limited = chain.find((link) => link.code === 'RATE_LIMITED');
   if (limited) {
     const retryAfterMs =
@@ -97,16 +107,24 @@ function transientRetryDelayMs(err: unknown, attempts: number): number | null {
         : typeof limited.retryAfter === 'number'
           ? limited.retryAfter * 1000
           : 0;
-    return retryAfterMs > 0 ? Math.min(retryAfterMs, MAX_RETRY_AFTER_MS) : backoff;
+    return retryAfterMs > 0 ? { retryAfterMs: Math.min(retryAfterMs, MAX_RETRY_AFTER_MS) } : {};
   }
   const status = chain.map(httpStatus).find((s) => s !== undefined);
-  if (status !== undefined) return status === 408 || status === 429 || status >= 500 ? backoff : null;
+  if (status !== undefined) return status === 408 || status === 429 || status >= 500 ? {} : null;
   const network = chain.some((link) => link.name === 'NetworkError' || TRANSIENT_NETWORK_CODES.has(String(link.code)));
-  return network ? backoff : null;
+  return network ? {} : null;
 }
 
-/** Conversation a channel send goes to. Its rate limit and its message order
- *  both belong to the conversation, so threads share it. */
+function retryDelayMs(failure: TransientFailure, attempts: number): number {
+  return (
+    failure.retryAfterMs ?? Math.min(TRANSIENT_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_MAX_DELAY_MS)
+  );
+}
+
+/** Conversation a channel send goes to; its rate limit and message order
+ *  belong to it. The hold covers this session's messages only: another
+ *  session sending to the same conversation is not held, and order across
+ *  sessions is not guaranteed (as before). */
 function channelDestination(msg: OutboundMessage): string | null {
   if (msg.kind === 'system' || !msg.channelType || msg.channelType === 'agent' || !msg.platformId) return null;
   return `${msg.channelType}\u0000${msg.platformId}`;
@@ -132,16 +150,26 @@ const DELIVERY_CONCURRENCY = 8;
  * give-up decision for this tick (the message just retries next poll), and a
  * failed clear leaves a stale row the next lifecycle of the same id clears.
  */
-async function recordAttemptRow(messageId: string, sessionId: string, err: unknown): Promise<number | null> {
+async function recordAttemptRow(
+  messageId: string,
+  sessionId: string,
+  err: unknown,
+  transient: TransientFailure | null,
+): Promise<{ attempts: number; retryInMs: number | null } | null> {
   /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
   try {
-    return await recordDeliveryAttempt({
+    // One write carries the count and its deadline, so a crash cannot keep
+    // one without the other. The read is safe: one drain per session at a time.
+    const prior = (await getDeliveryAttempt(messageId))?.attempts ?? 0;
+    const retryInMs = transient ? retryDelayMs(transient, prior + 1) : null;
+    const attempts = await recordDeliveryAttempt({
       messageId,
       sessionId,
       now: new Date().toISOString(),
-      nextAttemptAt: null,
+      nextAttemptAt: retryInMs === null ? null : new Date(Date.now() + retryInMs).toISOString(),
       error: err instanceof Error ? err.message : String(err),
     });
+    return { attempts, retryInMs };
   } catch (recordErr) {
     log.error('Failed to record delivery attempt — retrying next poll without a count', {
       messageId,
@@ -149,16 +177,6 @@ async function recordAttemptRow(messageId: string, sessionId: string, err: unkno
       err: recordErr,
     });
     return null;
-  }
-  /* eslint-enable no-catch-all/no-catch-all */
-}
-
-async function scheduleRetryRow(messageId: string, retryInMs: number): Promise<void> {
-  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
-  try {
-    await setDeliveryRetryAt(messageId, new Date(Date.now() + retryInMs).toISOString());
-  } catch (err) {
-    log.error('Failed to schedule delivery retry — retrying next poll', { messageId, err });
   }
   /* eslint-enable no-catch-all/no-catch-all */
 }
@@ -376,8 +394,8 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   // A message backing off after a transient failure is skipped until it is
-  // due, never slept on, and holds its destination so later messages to it
-  // keep their order. Other destinations and sessions go on.
+  // due, never slept on, and holds its destination so this session's later
+  // messages to it keep their order. Other destinations and sessions go on.
   const backingOff =
     pending.length > 0 ? await listDeliveryBackoffs(session.id, new Date().toISOString()) : new Set<string>();
   const heldDestinations = new Set<string>();
@@ -423,9 +441,10 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
-      const attempts = await recordAttemptRow(msg.id, session.id, err);
-      const retryInMs = destination ? transientRetryDelayMs(err, attempts ?? 1) : null;
-      const maxAttempts = retryInMs === null ? MAX_DELIVERY_ATTEMPTS : MAX_TRANSIENT_ATTEMPTS;
+      const transient = destination ? transientFailure(err) : null;
+      const record = await recordAttemptRow(msg.id, session.id, err, transient);
+      const attempts = record?.attempts ?? null;
+      const maxAttempts = transient ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
       if (attempts !== null && attempts >= maxAttempts) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
@@ -443,14 +462,13 @@ async function drainSession(session: Session): Promise<void> {
             err: markErr,
           });
         }
-      } else if (retryInMs !== null && destination) {
+      } else if (transient && destination) {
         heldDestinations.add(destination);
-        await scheduleRetryRow(msg.id, retryInMs);
         log.warn('Message delivery failed transiently, holding its destination', {
           messageId: msg.id,
           sessionId: session.id,
           attempt: attempts,
-          retryInMs,
+          retryInMs: record?.retryInMs ?? null,
           err,
         });
       } else {

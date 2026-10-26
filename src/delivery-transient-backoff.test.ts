@@ -324,3 +324,69 @@ describe('permanent delivery failures behave as before', () => {
     expect((await getDeliveryAttempt('reset'))?.next_attempt_at).toBe(new Date(T0 + 2_000).toISOString());
   });
 });
+
+describe('review round 1', () => {
+  it('writes the retry deadline in the same statement as the attempt count, so a crash between writes cannot lose it', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'held', 'teams:conv-1', 'held');
+    scriptedAdapter(new Map([['held', () => rateLimited(300)]]), new Map([['held', 1]]));
+    // The state a crash right after the first delivery_attempts write would leave behind.
+    const db = getDb();
+    const realRun = db.run.bind(db);
+    const snapshot: { taken: boolean; row?: Awaited<ReturnType<typeof getDeliveryAttempt>> } = { taken: false };
+    const spy = vi.spyOn(db, 'run').mockImplementation(async (sql: string, ...params: unknown[]) => {
+      const result = await realRun(sql, ...params);
+      if (!snapshot.taken && sql.includes('delivery_attempts')) {
+        snapshot.taken = true;
+        snapshot.row = await getDeliveryAttempt('held');
+      }
+      return result;
+    });
+    try {
+      await deliverSessionMessages(session);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(snapshot.taken).toBe(true);
+    expect(snapshot.row?.next_attempt_at).toBe(new Date(T0 + 300_000).toISOString());
+  });
+
+  it('an HTTP 400 five links deep still overrides NetworkError', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'bad', 'teams:conv-1', 'bad');
+    insertOutbound(session.id, 'next', 'teams:conv-1', 'next');
+    let error: Error = Object.assign(new Error('Bad Request'), { statusCode: 400 });
+    for (let i = 0; i < 4; i++) error = Object.assign(new Error('wrapped'), { name: 'NetworkError', cause: error });
+    const sent = scriptedAdapter(new Map([['bad', () => error]]), new Map([['bad', 1]]));
+
+    await deliverSessionMessages(session);
+    expect((await getDeliveryAttempt('bad'))?.next_attempt_at).toBeNull();
+    expect(sent).toEqual(['bad', 'next']);
+  });
+
+  it('a cause chain that loops, or is too deep to read, counts as permanent', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'loop', 'teams:conv-1', 'loop');
+    insertOutbound(session.id, 'deep', 'teams:conv-2', 'deep');
+    const loop = Object.assign(new Error('loop'), { name: 'NetworkError' }) as Error & { cause?: unknown };
+    loop.cause = loop;
+    let deep: Error = Object.assign(new Error('Bad Request'), { statusCode: 400 });
+    for (let i = 0; i < 100; i++) deep = Object.assign(new Error('wrapped'), { name: 'NetworkError', cause: deep });
+    scriptedAdapter(
+      new Map<string, () => Error>([
+        ['loop', () => loop],
+        ['deep', () => deep],
+      ]),
+      new Map([
+        ['loop', 1],
+        ['deep', 1],
+      ]),
+    );
+
+    await deliverSessionMessages(session);
+    // A loop of NetworkErrors is a real network error; it is read once, not forever.
+    expect((await getDeliveryAttempt('loop'))?.next_attempt_at).toBe(new Date(T0 + 2_000).toISOString());
+    // A chain cut short is never assumed transient.
+    expect((await getDeliveryAttempt('deep'))?.next_attempt_at).toBeNull();
+  });
+});
