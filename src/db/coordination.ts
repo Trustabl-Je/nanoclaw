@@ -272,14 +272,10 @@ export async function getDeliveryAttempt(messageId: string): Promise<DeliveryAtt
   return getDb().get<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE message_id = ?', messageId);
 }
 
-/** A session's messages still backing off at `now`. */
-export async function listDeliveryBackoffs(sessionId: string, now: string): Promise<Set<string>> {
-  const rows = await getDb().all<{ message_id: string }>(
-    'SELECT message_id FROM delivery_attempts WHERE session_id = ? AND next_attempt_at > ?',
-    sessionId,
-    now,
-  );
-  return new Set(rows.map((row) => row.message_id));
+/** A session's attempt rows by message id: what the drain checks before a send. */
+export async function listDeliveryAttempts(sessionId: string): Promise<Map<string, DeliveryAttemptRow>> {
+  const rows = await getDb().all<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE session_id = ?', sessionId);
+  return new Map(rows.map((row) => [row.message_id, row]));
 }
 
 /** Delivered or terminally failed — the row's job is done. */

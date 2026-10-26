@@ -247,25 +247,26 @@ describe('transient delivery failures back off instead of being dropped', () => 
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound(session.id, 'early', 'teams:conv-1', 'early');
     insertOutbound(session.id, 'late', 'teams:conv-2', 'late');
+    // Transient rows always carry a deadline; these are due now.
     for (let i = 0; i < 33; i++) {
       await recordDeliveryAttempt({
         messageId: 'early',
         sessionId: session.id,
         now: new Date(T0).toISOString(),
-        nextAttemptAt: null,
+        nextAttemptAt: new Date(T0).toISOString(),
       });
       await recordDeliveryAttempt({
         messageId: 'late',
         sessionId: session.id,
         now: new Date(T0).toISOString(),
-        nextAttemptAt: null,
+        nextAttemptAt: new Date(T0).toISOString(),
       });
     }
     await recordDeliveryAttempt({
       messageId: 'late',
       sessionId: session.id,
       now: new Date(T0).toISOString(),
-      nextAttemptAt: null,
+      nextAttemptAt: new Date(T0).toISOString(),
     });
     scriptedAdapter(
       new Map([
@@ -484,6 +485,55 @@ describe('review round 2', () => {
     await deliverSessionMessages(session);
     expect(status(session.id, 'long')).toBe('delivered');
     expect(posted.map((chunk) => chunk.split('.')[0])).toEqual(['first', 'first', 'first', 'second', 'third', 'after']);
+  });
+
+  it('a give-up a restart cut short is marked failed without another send', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'long', 'teams:conv-1', SPLIT_REPLY);
+    const posted = splittingChannel((chunk) => (chunk.startsWith('second') ? telegramRateLimited() : undefined));
+    for (let s = 0; s <= 3; s += 3) {
+      at(s * 1000);
+      await deliverSessionMessages(session);
+    }
+    expect(posted).toHaveLength(2);
+    // The third send fails and is stored; the host stops before it marks the message failed.
+    at(6_000);
+    await recordDeliveryAttempt({
+      messageId: 'long',
+      sessionId: session.id,
+      now: new Date().toISOString(),
+      nextAttemptAt: null,
+      error: 'Reply partly sent (1 of 3 chunks)',
+    });
+    at(60_000);
+    await deliverSessionMessages(session);
+    expect(posted).toHaveLength(2);
+    expect(status(session.id, 'long')).toBe('failed');
+    expect(await getDeliveryAttempt('long')).toBeUndefined();
+  });
+
+  it('the failure that reaches the cap stores no retry deadline', async () => {
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound(session.id, 'long', 'teams:conv-1', SPLIT_REPLY);
+    splittingChannel((chunk) => (chunk.startsWith('second') ? telegramRateLimited() : undefined));
+    const db = getDb();
+    const realRun = db.run.bind(db);
+    // Stop the host right after the third failure is stored, before it is marked failed.
+    let stored: Awaited<ReturnType<typeof getDeliveryAttempt>>;
+    const spy = vi.spyOn(db, 'run').mockImplementation(async (sql: string, ...params: unknown[]) => {
+      const result = await realRun(sql, ...params);
+      if (sql.includes('delivery_attempts') && !sql.startsWith('DELETE')) stored = await getDeliveryAttempt('long');
+      return result;
+    });
+    try {
+      for (let s = 0; s <= 6; s += 3) {
+        at(s * 1000);
+        await deliverSessionMessages(session);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    expect(stored!).toMatchObject({ attempts: 3, next_attempt_at: null });
   });
 
   it('caps a long Retry-After at 5 minutes', async () => {

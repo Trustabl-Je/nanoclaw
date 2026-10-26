@@ -28,7 +28,7 @@ import {
 import {
   clearDeliveryAttempt,
   getDeliveryAttempt,
-  listDeliveryBackoffs,
+  listDeliveryAttempts,
   recordDeliveryAttempt,
 } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
@@ -122,6 +122,12 @@ function transientCause(chain: Record<string, unknown>[]): TransientFailure | nu
   return network ? {} : null;
 }
 
+/** A reply split into chunks reposts its sent chunks on every retry, so a
+ *  partly sent one keeps the short cap: still backed off, posted ≤3 times. */
+function attemptCap(transient: TransientFailure | null): number {
+  return transient && !transient.partial ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
+}
+
 function retryDelayMs(failure: TransientFailure, attempts: number): number {
   return (
     failure.retryAfterMs ?? Math.min(TRANSIENT_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_MAX_DELAY_MS)
@@ -162,13 +168,16 @@ async function recordAttemptRow(
   sessionId: string,
   err: unknown,
   transient: TransientFailure | null,
+  maxAttempts: number,
 ): Promise<{ attempts: number; retryInMs: number | null } | null> {
   /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
   try {
     // One write carries the count and its deadline, so a crash cannot keep
     // one without the other. The read is safe: one drain per session at a time.
+    // The failure that reaches the cap gets no deadline: a count at the short
+    // cap with none due marks a give-up a restart cut short.
     const prior = (await getDeliveryAttempt(messageId))?.attempts ?? 0;
-    const retryInMs = transient ? retryDelayMs(transient, prior + 1) : null;
+    const retryInMs = transient && prior + 1 < maxAttempts ? retryDelayMs(transient, prior + 1) : null;
     const attempts = await recordDeliveryAttempt({
       messageId,
       sessionId,
@@ -403,13 +412,39 @@ async function drainSession(session: Session): Promise<void> {
   // A message backing off after a transient failure is skipped until it is
   // due, never slept on, and holds its destination so this session's later
   // messages to it keep their order. Other destinations and sessions go on.
-  const backingOff =
-    pending.length > 0 ? await listDeliveryBackoffs(session.id, new Date().toISOString()) : new Set<string>();
+  const attemptRows = pending.length > 0 ? await listDeliveryAttempts(session.id) : new Map<string, never>();
+  const now = new Date().toISOString();
   const heldDestinations = new Set<string>();
+
+  const giveUp = async (msgId: string, attempts: number, err: unknown): Promise<void> => {
+    log.error('Message delivery failed permanently, giving up', {
+      messageId: msgId,
+      sessionId: session.id,
+      attempts,
+      err,
+    });
+    try {
+      await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msgId));
+      await clearAttemptRow(msgId);
+    } catch (markErr) {
+      log.error('Failed to record permanent delivery failure', {
+        messageId: msgId,
+        sessionId: session.id,
+        err: markErr,
+      });
+    }
+  };
+
   for (const msg of pending) {
     const destination = channelDestination(msg);
     if (destination && heldDestinations.has(destination)) continue;
-    if (backingOff.has(msg.id)) {
+    const row = attemptRows.get(msg.id);
+    // The host stopped between storing the last failure and marking it failed.
+    if (row && row.next_attempt_at === null && row.attempts >= MAX_DELIVERY_ATTEMPTS) {
+      await giveUp(msg.id, row.attempts, row.last_error);
+      continue;
+    }
+    if (row?.next_attempt_at && row.next_attempt_at > now) {
       if (destination) heldDestinations.add(destination);
       continue;
     }
@@ -449,28 +484,11 @@ async function drainSession(session: Session): Promise<void> {
       }
     } catch (err) {
       const transient = destination ? transientFailure(err) : null;
-      const record = await recordAttemptRow(msg.id, session.id, err, transient);
+      const maxAttempts = attemptCap(transient);
+      const record = await recordAttemptRow(msg.id, session.id, err, transient, maxAttempts);
       const attempts = record?.attempts ?? null;
-      // A reply split into chunks reposts its sent chunks on every retry, so a
-      // partly sent one keeps the short cap: still backed off, posted ≤3 times.
-      const maxAttempts = transient && !transient.partial ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
       if (attempts !== null && attempts >= maxAttempts) {
-        log.error('Message delivery failed permanently, giving up', {
-          messageId: msg.id,
-          sessionId: session.id,
-          attempts,
-          err,
-        });
-        try {
-          await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
-          await clearAttemptRow(msg.id);
-        } catch (markErr) {
-          log.error('Failed to record permanent delivery failure', {
-            messageId: msg.id,
-            sessionId: session.id,
-            err: markErr,
-          });
-        }
+        await giveUp(msg.id, attempts, err);
       } else if (transient && destination) {
         heldDestinations.add(destination);
         log.warn('Message delivery failed transiently, holding its destination', {
