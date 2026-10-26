@@ -25,7 +25,12 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
-import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
+import {
+  clearDeliveryAttempt,
+  listDeliveryBackoffs,
+  recordDeliveryAttempt,
+  setDeliveryRetryAt,
+} from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
@@ -41,6 +46,72 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+/** Transient failures back off 2 s, 4 s, 8 s, 16 s, 32 s, then every 60 s;
+ *  the 35th failure lands about 30 minutes after the first and gives up. */
+const TRANSIENT_BASE_DELAY_MS = 2_000;
+const TRANSIENT_MAX_DELAY_MS = 60_000;
+const MAX_TRANSIENT_ATTEMPTS = 35;
+const MAX_RETRY_AFTER_MS = 5 * 60_000;
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EAI_AGAIN',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+function httpStatus(err: Record<string, unknown>): number | undefined {
+  const response = err.response as { status?: unknown } | undefined;
+  const inner = err.innerHttpError as { statusCode?: unknown } | undefined;
+  for (const value of [err.status, err.statusCode, response?.status, inner?.statusCode]) {
+    if (typeof value === 'number' && value >= 100 && value < 600) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Milliseconds to wait before retrying a send that may succeed later, or null
+ * for a permanent failure. Transient: a rate limit (Chat SDK code
+ * RATE_LIMITED, honouring its Retry-After), HTTP 408/429/5xx, or a network
+ * error. An HTTP status anywhere in the cause chain decides before the
+ * error's name, because adapters wrap a 400 in a NetworkError. Unknown errors
+ * stay permanent, so a deterministic failure can never wedge a destination.
+ */
+function transientRetryDelayMs(err: unknown, attempts: number): number | null {
+  const chain: Record<string, unknown>[] = [];
+  for (let e: unknown = err; e && typeof e === 'object' && chain.length < 4; ) {
+    const link = e as Record<string, unknown>;
+    chain.push(link);
+    e = link.originalError ?? link.cause;
+  }
+  const backoff = Math.min(TRANSIENT_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_MAX_DELAY_MS);
+  const limited = chain.find((link) => link.code === 'RATE_LIMITED');
+  if (limited) {
+    const retryAfterMs =
+      typeof limited.retryAfterMs === 'number'
+        ? limited.retryAfterMs
+        : typeof limited.retryAfter === 'number'
+          ? limited.retryAfter * 1000
+          : 0;
+    return retryAfterMs > 0 ? Math.min(retryAfterMs, MAX_RETRY_AFTER_MS) : backoff;
+  }
+  const status = chain.map(httpStatus).find((s) => s !== undefined);
+  if (status !== undefined) return status === 408 || status === 429 || status >= 500 ? backoff : null;
+  const network = chain.some((link) => link.name === 'NetworkError' || TRANSIENT_NETWORK_CODES.has(String(link.code)));
+  return network ? backoff : null;
+}
+
+/** Conversation a channel send goes to. Its rate limit and its message order
+ *  both belong to the conversation, so threads share it. */
+function channelDestination(msg: OutboundMessage): string | null {
+  if (msg.kind === 'system' || !msg.channelType || msg.channelType === 'agent' || !msg.platformId) return null;
+  return `${msg.channelType}\u0000${msg.platformId}`;
+}
+
 /**
  * Sessions drained in parallel per poll tick. A visit is one mailbox round
  * trip (read the queue) plus the channel sends; serially, a tick scaled as
@@ -78,6 +149,16 @@ async function recordAttemptRow(messageId: string, sessionId: string, err: unkno
       err: recordErr,
     });
     return null;
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
+async function scheduleRetryRow(messageId: string, retryInMs: number): Promise<void> {
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    await setDeliveryRetryAt(messageId, new Date(Date.now() + retryInMs).toISOString());
+  } catch (err) {
+    log.error('Failed to schedule delivery retry — retrying next poll', { messageId, err });
   }
   /* eslint-enable no-catch-all/no-catch-all */
 }
@@ -294,7 +375,19 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
+  // A message backing off after a transient failure is skipped until it is
+  // due, never slept on, and holds its destination so later messages to it
+  // keep their order. Other destinations and sessions go on.
+  const backingOff =
+    pending.length > 0 ? await listDeliveryBackoffs(session.id, new Date().toISOString()) : new Set<string>();
+  const heldDestinations = new Set<string>();
   for (const msg of pending) {
+    const destination = channelDestination(msg);
+    if (destination && heldDestinations.has(destination)) continue;
+    if (backingOff.has(msg.id)) {
+      if (destination) heldDestinations.add(destination);
+      continue;
+    }
     try {
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
@@ -331,7 +424,9 @@ async function drainSession(session: Session): Promise<void> {
       }
     } catch (err) {
       const attempts = await recordAttemptRow(msg.id, session.id, err);
-      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
+      const retryInMs = destination ? transientRetryDelayMs(err, attempts ?? 1) : null;
+      const maxAttempts = retryInMs === null ? MAX_DELIVERY_ATTEMPTS : MAX_TRANSIENT_ATTEMPTS;
+      if (attempts !== null && attempts >= maxAttempts) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
           sessionId: session.id,
@@ -348,6 +443,16 @@ async function drainSession(session: Session): Promise<void> {
             err: markErr,
           });
         }
+      } else if (retryInMs !== null && destination) {
+        heldDestinations.add(destination);
+        await scheduleRetryRow(msg.id, retryInMs);
+        log.warn('Message delivery failed transiently, holding its destination', {
+          messageId: msg.id,
+          sessionId: session.id,
+          attempt: attempts,
+          retryInMs,
+          err,
+        });
       } else {
         log.warn('Message delivery failed, will retry', {
           messageId: msg.id,
